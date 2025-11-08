@@ -152,11 +152,68 @@ def process_files_with_pyspark(
 ) -> Dict[str, Any]:
     """Process files with PySpark locally - validates schema and writes Parquet files."""
     try:
+        import subprocess
+        import sys
+        import os
+        
+        # Check if Java is available before attempting to use PySpark
+        # This prevents error messages from being printed to stderr
+        java_home = os.environ.get('JAVA_HOME')
+        
+        # If JAVA_HOME not set, try common Homebrew locations (prefer Java 21 LTS for Spark compatibility)
+        if not java_home:
+            # Try Java 21 first (LTS, better Spark compatibility)
+            java21_home = '/opt/homebrew/opt/openjdk@21'
+            if os.path.exists(os.path.join(java21_home, 'bin', 'java')):
+                java_home = java21_home
+                os.environ['JAVA_HOME'] = java_home
+            else:
+                # Fallback to Java 25
+                common_java_home = '/opt/homebrew/opt/openjdk'
+                if os.path.exists(os.path.join(common_java_home, 'bin', 'java')):
+                    java_home = common_java_home
+                    os.environ['JAVA_HOME'] = java_home
+        
+        # Try to find Java - check JAVA_HOME first, then PATH
+        java_cmd = 'java'
+        if java_home:
+            java_cmd_path = os.path.join(java_home, 'bin', 'java')
+            if os.path.exists(java_cmd_path):
+                java_cmd = java_cmd_path
+        
+        try:
+            # Suppress stderr to avoid Java error messages
+            with open(os.devnull, 'w') as devnull:
+                result = subprocess.run(
+                    [java_cmd, '-version'],
+                    stderr=devnull,
+                    stdout=devnull,
+                    timeout=2,
+                    env=os.environ.copy()  # Preserve environment including JAVA_HOME
+                )
+            if result.returncode != 0:
+                raise Exception("Java not available")
+        except (FileNotFoundError, subprocess.TimeoutExpired, Exception):
+            # Java not found or not working - check if JAVA_HOME points to valid Java
+            if java_home and os.path.exists(os.path.join(java_home, 'bin', 'java')):
+                # JAVA_HOME is set and Java exists there - set it and continue
+                os.environ['JAVA_HOME'] = java_home
+            else:
+                # Java not found - skip PySpark
+                raise ImportError("Java runtime not available")
+        
         from pyspark.sql import SparkSession
         from pyspark.sql.functions import input_file_name, udf, col, explode
         from pyspark.sql.types import StringType
         from pyspark.sql.utils import AnalysisException
 
+        # Set JAVA_HOME for Spark if not already set
+        if java_home:
+            os.environ['JAVA_HOME'] = java_home
+        
+        # Create SparkSession
+        # Java 21 (LTS) works without compatibility flags
+        # Java 25+ would need additional --add-opens flags, but we prefer Java 21 for Spark
         spark = SparkSession.builder \
             .appName(SPARK_APP_NAME) \
             .master(SPARK_MASTER) \
@@ -165,38 +222,63 @@ def process_files_with_pyspark(
         partition_col = metadata_dict.get("partition_column", "date") if metadata_dict else "date"
         schema_def = metadata_dict.get("schema_definition") if metadata_dict else None
         
-        # Convert JSON schema to Spark schema if available
+        # Convert JSON schema to Spark schema if available (for validation after extraction)
         spark_schema = None
         if schema_def:
             spark_schema = convert_json_schema_to_spark_schema(schema_def)
         
-        # Read JSON files with schema validation
+        # Read JSON files WITHOUT schema first (because JSON has nested structure)
+        # We'll extract the nested data first, then validate
+        # Use multiLine=True because our JSON files have arrays of objects
         try:
-            if spark_schema:
-                # Read with schema - will fail if data doesn't match
-                df = spark.read.schema(spark_schema).json(file_paths)
-            else:
-                # Fallback: read without schema
-                df = spark.read.json(file_paths)
+            df = spark.read.option("multiLine", "true").json(file_paths)
         except AnalysisException as e:
             spark.stop()
             return {
                 "status": "schema_validation_failed",
-                "error": f"Schema validation failed: {str(e)}",
+                "error": f"Failed to read JSON files: {str(e)}",
                 "records_count": 0,
             }
         
         # Extract records from nested structure (e.g., {"vehicles_events": [...]})
-        # Flatten if needed
+        # Flatten if needed - handle both singular and plural forms
         columns = df.columns
-        if len(columns) == 1 and file_type in columns:
-            # Data is nested like {"vehicle_events": [...]}
-            df = df.select(explode(col(file_type)).alias("data"))
-            df = df.select("data.*")
-        elif file_type in columns:
-            # Data has file_type as a column with array
-            df = df.select(explode(col(file_type)).alias("data"))
-            df = df.select("data.*")
+        
+        # Try to find the array column (could be file_type or plural version)
+        array_column = None
+        if file_type in columns:
+            array_column = file_type
+        elif f"{file_type}s" in columns:  # e.g., vehicle_events -> vehicles_events
+            array_column = f"{file_type}s"
+        elif len(columns) == 1 and columns[0] != "_corrupt_record":
+            # Only one column - use it (but not _corrupt_record)
+            array_column = columns[0]
+        
+        if not array_column:
+            spark.stop()
+            return {
+                "status": "schema_validation_failed",
+                "error": f"Could not find array column for file_type '{file_type}' in columns: {columns}",
+                "records_count": 0,
+            }
+        
+        # Data is nested like {"vehicles_events": [...]} or {"vehicle_events": [...]}
+        df = df.select(explode(col(array_column)).alias("data"))
+        df = df.select("data.*")
+        
+        # Now validate against schema if provided (after extraction)
+        if spark_schema:
+            # Check if extracted columns match expected schema
+            expected_cols = set([field.name for field in spark_schema.fields])
+            actual_cols = set(df.columns)
+            missing_cols = expected_cols - actual_cols
+            if missing_cols:
+                spark.stop()
+                return {
+                    "status": "schema_validation_failed",
+                    "error": f"Missing columns after extraction: {missing_cols}",
+                    "records_count": 0,
+                }
         
         # Extract date from filename using UDF
         def extract_date_from_path(path_str):
@@ -237,115 +319,10 @@ def process_files_with_pyspark(
         }
 
     except ImportError:
-        return process_files_simulation(file_paths, file_type, output_table, metadata_dict)
+        return {"status": "failed", "error": "PySpark not installed", "records_count": 0}
     except Exception as e:
         return {"status": "failed", "error": str(e), "records_count": 0}
 
-
-def process_files_simulation(
-    file_paths: List[str], file_type: str, output_table: Path, metadata_dict=None
-) -> Dict[str, Any]:
-    """Fallback simulation with schema validation - writes Parquet files using pyarrow."""
-    try:
-        import pyarrow as pa
-        import pyarrow.parquet as pq
-    except (ImportError, AttributeError, RuntimeError) as e:
-        # If pyarrow not available or has compatibility issues (e.g., NumPy version), fall back to JSON
-        return process_files_simulation_json(file_paths, file_type, output_table, metadata_dict)
-    
-    total_records = 0
-    partition_col = metadata_dict.get("partition_column", "date") if metadata_dict else "date"
-    schema_def = metadata_dict.get("schema_definition") if metadata_dict else None
-    
-    # Group files by partition date
-    files_by_partition = {}
-    
-    for file_path in file_paths:
-        data = read_json_file(file_path)
-        
-        # Validate schema if available
-        if schema_def:
-            is_valid, error_msg = validate_data_against_schema(data, schema_def, file_type)
-            if not is_valid:
-                return {
-                    "status": "schema_validation_failed",
-                    "error": error_msg,
-                    "records_count": 0,
-                    "file_path": file_path,
-                }
-        
-        # Extract records
-        records = data.get(file_type, []) or data.get(f"{file_type}s", [])
-        if not records:
-            records = list(data.values())[0] if data else []
-        
-        filename = Path(file_path).name
-        partition_date = extract_date_from_filename(filename)
-        
-        if partition_date not in files_by_partition:
-            files_by_partition[partition_date] = []
-        files_by_partition[partition_date].extend(records)
-        total_records += len(records)
-    
-    # Write Parquet files partitioned by date
-    for partition_date, records in files_by_partition.items():
-        if not records:
-            continue
-            
-        # Convert to PyArrow table
-        table = pa.Table.from_pylist(records)
-        
-        # Write Parquet file
-        partition_path = output_table / f"{partition_col}={partition_date}"
-        partition_path.mkdir(parents=True, exist_ok=True)
-        
-        parquet_file = partition_path / f"data_{partition_date}.parquet"
-        pq.write_table(table, str(parquet_file))
-    
-    return {
-        "status": "success",
-        "records_count": total_records,
-        "files_processed": len(file_paths),
-    }
-
-
-def process_files_simulation_json(
-    file_paths: List[str], file_type: str, output_table: Path, metadata_dict=None
-) -> Dict[str, Any]:
-    """Fallback if pyarrow not available - validates but writes JSON."""
-    total_records = 0
-    partition_col = metadata_dict.get("partition_column", "date") if metadata_dict else "date"
-    schema_def = metadata_dict.get("schema_definition") if metadata_dict else None
-    
-    for file_path in file_paths:
-        data = read_json_file(file_path)
-        
-        # Validate schema if available
-        if schema_def:
-            is_valid, error_msg = validate_data_against_schema(data, schema_def, file_type)
-            if not is_valid:
-                return {
-                    "status": "schema_validation_failed",
-                    "error": error_msg,
-                    "records_count": 0,
-                    "file_path": file_path,
-                }
-        
-        records = data.get(file_type, []) or data.get(f"{file_type}s", [])
-        if not records:
-            records = list(data.values())[0] if data else []
-        
-        filename = Path(file_path).name
-        partition_date = extract_date_from_filename(filename)
-        output_path = output_table / f"{partition_col}={partition_date}" / filename
-        s3_driver.write_file(str(output_path), json.dumps(data).encode("utf-8"))
-        total_records += len(records)
-    
-    return {
-        "status": "success",
-        "records_count": total_records,
-        "files_processed": len(file_paths),
-    }
 
 # In production (non-challenge): Would submit Spark job to EMR cluster
 # EMR would read all files from processing folder in s3, apply schema from metadata,

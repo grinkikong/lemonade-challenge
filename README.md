@@ -11,21 +11,28 @@ A scalable data ingestion pipeline using Prefect as scheduler, Spark for heavy l
 
 The pipeline consists of two Prefect jobs that work together to ingest, process, and aggregate vehicle data:
 
-### 1. Hourly Ingestion Pipeline (Combined Job with 2 Dependent Tasks)
+### 1. Hourly Ingestion Pipeline (Combined Job with 3 Dependent Tasks)
 - **Schedule**: Every hour at :00
 - **Task 1 - New File Type Discovery**:
-  - Scans incoming folder for new JSON files
+  - Scans `data/source_data/incoming/` folder for new JSON files
   - Detects file types from filenames (pattern: `{file_type}_{timestamp}.json`)
   - Creates inactive metadata records in `table_metadata` for any new file types not yet registered
   - Admin can then configure `schema_definition` and `processing_config` and set status to "active"
+  - Moves valid files to `data/source_data/processing/{file_type}/`
+  - Moves invalid files (missing/inactive metadata) to `data/source_data/failed/`
 - **Task 2 - Spark Processing** (depends on Task 1):
-  - Automatically discovers all folders in processing directory
+  - Automatically discovers all folders in `data/source_data/processing/` directory
   - Loops through each folder and processes all files
   - Retrieves table metadata (schema and processing config) from database
-  - Submits Spark jobs (EMR or local) for each file using metadata
-  - Writes processed data to datalake (S3 as Parquet files in Iceberg format)
-  - Moves successfully processed files to processed/ folder
-  - Moves failed files to failed/ folder
+  - Processes files with PySpark (local) or submits to EMR (production)
+  - Validates data against schema from metadata
+  - Writes processed data to datalake as Parquet files (partitioned by date)
+  - Moves failed files (including schema validation failures) to `data/source_data/failed/`
+  - Files remain in `processing/` after successful processing (Task 3 handles cleanup)
+- **Task 3 - Cleanup Processed Files** (depends on Task 2):
+  - Discovers all folders in `data/source_data/processing/`
+  - Verifies that corresponding Parquet files exist in the datalake
+  - Only if Parquet files exist, moves all files from `processing/{file_type}/` to `processed/{file_type}/`
 
 ### 2. Daily Summary Aggregation (Job)
 - **Schedule**: Daily at 1:00 AM UTC
@@ -38,19 +45,23 @@ The pipeline consists of two Prefect jobs that work together to ingest, process,
 ## Data Flow
 
 ```
-Incoming Files (JSON) in incoming/
+Incoming Files (JSON) in data/source_data/incoming/
     ↓
 Hourly Pipeline - Task 1: File Discovery & Movement
     ↓
-Validate metadata → Move to source_data/processing/ or source_data/failed/
+Validate metadata → Move to data/source_data/processing/{file_type}/ or data/source_data/failed/
     ↓
 Hourly Pipeline - Task 2: Auto-discover folders & Spark Processing
     ↓
-Datalake (Parquet files)
+Datalake (Parquet files in data/datalake/raw_data/)
+    ↓
+Hourly Pipeline - Task 3: Cleanup Processed Files
+    ↓
+Move to data/source_data/processed/{file_type}/
     ↓
 Daily Job: Summary Aggregation
     ↓
-Summary Table (Iceberg)
+Summary Table (Parquet in data/datalake/dwh/daily_summary/)
 ```
 
 ## Project Structure
@@ -58,8 +69,11 @@ Summary Table (Iceberg)
 ```
 lemonade-challenge/
 ├── prefect_jobs/                    # Prefect job definitions
-│   ├── hourly_ingestion_pipeline/  # Combined job with 2 tasks
-│   │   ├── main.py                 # Task 1: File discovery, Task 2: Spark processing
+│   ├── hourly_ingestion_pipeline/  # Combined job with 3 tasks
+│   │   ├── main.py                 # Flow definition
+│   │   ├── move_new_files.py       # Task 1: File discovery
+│   │   ├── spark_processing.py     # Task 2: Spark processing
+│   │   ├── cleanup_processed.py    # Task 3: Cleanup
 │   │   ├── config.py
 │   │   └── utils.py
 │   └── daily_summary_aggregation/   # Daily summary job
@@ -69,25 +83,29 @@ lemonade-challenge/
 ├── data_utils/                      # Shared utilities
 │   ├── database/                    # Database drivers and models
 │   │   ├── drivers.py
-│   │   └── models.py
+│   │   ├── models.py
+│   │   └── schema.py
 │   └── aws/                         # AWS/S3 drivers
 │       └── s3_driver.py
 ├── data/                            # Data folders
-│   ├── incoming/                    # All incoming files land here
-│   ├── source_data/                 # Processing and error handling
+│   ├── source_data/                 # Source data and processing stages
+│   │   ├── incoming/                # All incoming files land here
 │   │   ├── processing/              # Files being processed
 │   │   │   ├── vehicle_events/
 │   │   │   └── vehicle_status/
-│   │   ├── failed/                  # Failed files
-│   │   └── error/                   # Schema validation errors
-│   ├── processed/                   # Successfully processed files
+│   │   ├── failed/                  # Failed files (including schema validation errors)
+│   │   └── processed/               # Successfully processed files
 │   └── datalake/                    # Processed data (Parquet format)
 │       └── raw_data/
 │           ├── vehicle_events/      # Partitioned by date
 │           └── vehicle_status/      # Partitioned by date
+│       └── dwh/                     # Data warehouse (aggregated/transformed data)
+│           └── daily_summary/       # Daily aggregated summaries
 ├── scripts/                         # Utility scripts
 │   ├── create_tables.py
-│   └── generate_test_data.py
+│   ├── generate_test_data.py
+│   ├── setup_duckdb_catalog.py     # Create DuckDB catalog with schemas
+│   └── verify_summary.py           # Verify daily summary structure
 ├── prefect.yaml                     # Prefect deployments
 ├── pyproject.toml                   # Poetry dependencies
 └── README.md
@@ -101,6 +119,18 @@ lemonade-challenge/
 2. **Poetry**: Install with:
    ```bash
    curl -sSL https://install.python-poetry.org | python3 -
+   ```
+3. **DuckDB CLI**: Install with:
+   ```bash
+   brew install duckdb
+   ```
+4. **Java Development Kit (JDK)**: Required for PySpark. Install OpenJDK 21 (LTS) with:
+   ```bash
+   brew install openjdk@21
+   # Set JAVA_HOME permanently (add to ~/.zshrc or ~/.bashrc)
+   echo 'export JAVA_HOME="/opt/homebrew/opt/openjdk@21"' >> ~/.zshrc
+   echo 'export PATH="/opt/homebrew/opt/openjdk@21/bin:$PATH"' >> ~/.zshrc
+   source ~/.zshrc # Apply changes to current session
    ```
 
 ### Step-by-Step Installation
@@ -146,16 +176,17 @@ poetry run prefect deploy --all
 #### Step 3: Initialize Test Data
 
 ```bash
-# Generate test data and set up metadata (cleans all existing data first)
-poetry run python scripts/generate_test_data.py --num-files 5
+# Generate test data and set up metadata (cleans all existing data except DB first)
+poetry run python scripts/generate_test_data.py --num-files 5 --cleanup --clean-datalake
 ```
 
 This will:
-- Clean all existing data (incoming, source_data, processed, datalake folders)
-- Clean the database
-- Create fresh database tables
+- Clean all existing data folders (`data/source_data/incoming`, `processing`, `failed`, `processed`)
+- Clean the datalake (`data/datalake`)
+- **Keep the database** (`~/data/lemonade/metadata.db`) and its metadata
+- Create fresh database tables (if not exist)
 - Set up active metadata for `vehicle_events` and `vehicle_status`
-- Generate 5 test files of each type (10 files total) in `./data/incoming/`
+- Generate 5 test files of each type (10 files total) in `./data/source_data/incoming/`
 
 #### Step 4: Verify Setup
 
@@ -170,16 +201,22 @@ This will:
 
 3. **Check generated files**:
    ```bash
-   ls -la ./data/incoming/*.json
-   ls -la ./data/processed/*/
+   ls -la ./data/source_data/incoming/*.json
+   ls -la ./data/source_data/processed/*/
    ls -la ./data/datalake/raw_data/*/
    ```
 
 4. **Query the datalake** (verify Parquet files were created):
    ```bash
-   # Interactive SQL CLI
-   poetry run python scripts/query_interactive.py
-   # Then type: SELECT * FROM vehicle_events LIMIT 10;
+   # Option 1: Create DuckDB catalog (recommended)
+   poetry run python scripts/setup_duckdb_catalog.py
+   
+   # Query the datalake using DuckDB UI (opens in browser)
+   duckdb data/datalake/lemonade.duckdb -ui
+   
+   # Or use DuckDB CLI (if installed: brew install duckdb)
+   duckdb data/datalake/lemonade.duckdb
+   # Then type: SELECT * FROM raw_data.vehicle_events LIMIT 10;
    ```
 
 ### Quick Start (After Installation)
@@ -301,33 +338,75 @@ The system is designed to support any new file type with different payloads. To 
 
 ## Querying the Datalake
 
-After running the pipeline, you can query the Parquet files in the datalake using the interactive SQL CLI:
+After running the pipeline, you can query the Parquet files in the datalake using DuckDB:
+
+### Option 1: DuckDB Web UI (Recommended - Visual Interface)
+
+First, create the DuckDB catalog with explicit schemas (only needed once, or when table structure changes):
 
 ```bash
-poetry run python scripts/query_interactive.py
+poetry run python scripts/setup_duckdb_catalog.py
+```
+
+**Note:** The catalog uses glob patterns to automatically discover new Parquet files, so you don't need to regenerate it when new data arrives!
+
+Then launch the DuckDB Web UI (install DuckDB CLI with `brew install duckdb`):
+
+```bash
+duckdb data/datalake/lemonade.duckdb -ui
+```
+
+This launches a web interface in your browser (usually at `http://localhost:8080` or similar). You can:
+- Browse tables visually
+- Write and execute SQL queries
+- See query results in a table format
+- View table schemas
+
+### Option 2: DuckDB Command Line Interface
+
+```bash
+duckdb data/datalake/lemonade.duckdb
 ```
 
 **Example queries:**
 ```sql
-SQL> SELECT * FROM vehicle_events LIMIT 10;
-SQL> SELECT COUNT(*) FROM vehicle_events;
-SQL> SELECT event_type, COUNT(*) FROM vehicle_events GROUP BY event_type;
-SQL> SELECT * FROM vehicle_status WHERE status = 'driving';
-SQL> exit
+D SHOW SCHEMAS;
+D SHOW TABLES FROM raw_data;
+D SHOW TABLES FROM dwh;
+D SELECT * FROM raw_data.vehicle_events LIMIT 10;
+D SELECT COUNT(*) FROM raw_data.vehicle_events;
+D SELECT * FROM dwh.daily_summary LIMIT 10;
+D DESCRIBE raw_data.vehicle_events;
 ```
 
-**Available tables:**
-- `vehicle_events` - All vehicle events from Parquet files
-- `vehicle_status` - All vehicle statuses from Parquet files
+**Schema organization:**
+- **`raw_data` schema**: Raw event data
+  - `raw_data.vehicle_events` - Vehicle events (7 columns: vehicle_id, event_time, event_source, event_type, event_value, event_extra_data, date)
+  - `raw_data.vehicle_status` - Vehicle status reports (5 columns: vehicle_id, report_time, status_source, status, date)
+- **`dwh` schema**: Data warehouse (aggregated/transformed data)
+  - `dwh.daily_summary` - Daily aggregated summaries (4 columns: vehicle_id, day, last_event_time, last_event_type)
 
-The CLI automatically:
-- Finds all Parquet files in the datalake
-- Registers them as SQL tables
-- Allows you to query them with standard SQL
+**Example queries:**
+```sql
+-- Query raw data
+SELECT * FROM raw_data.vehicle_events LIMIT 10;
+SELECT * FROM raw_data.vehicle_status WHERE status = 'driving';
 
-**Alternative query methods:**
+-- Query DWH
+SELECT * FROM dwh.daily_summary ORDER BY day DESC LIMIT 10;
+
+-- Show schemas
+SHOW SCHEMAS;
+SHOW TABLES FROM raw_data;
+SHOW TABLES FROM dwh;
+```
+
+**Note:** The DuckDB catalog (`lemonade.duckdb`) acts as a metadata layer - Parquet files remain unchanged. All query engines (DuckDB, Spark, etc.) can query the same Parquet files.
+
+### Option 3: Other Query Methods (Optional)
+
 - **Spark SQL**: `poetry run python scripts/query_datalake_spark.py --table vehicle_events`
-- **DuckDB CLI**: `poetry run python scripts/query_datalake.py --table vehicle_events`
+- **DuckDB Python**: `poetry run python scripts/query_datalake.py --table vehicle_events`
 
 ## Database Access
 

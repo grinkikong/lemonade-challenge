@@ -58,6 +58,8 @@ data/processed/*
 !data/processed/.gitkeep
 data/datalake/*
 !data/datalake/.gitkeep
+# DuckDB catalog file (small metadata file)
+data/datalake/*.duckdb
 
 # Logs
 *.log

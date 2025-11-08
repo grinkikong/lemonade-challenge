@@ -1,7 +1,6 @@
 """Utilities for daily summary aggregation."""
 
 import json
-from pathlib import Path
 from typing import List, Dict, Any
 from datetime import datetime, date
 from data_utils.aws.s3_driver import s3_driver

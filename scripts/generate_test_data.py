@@ -56,6 +56,10 @@ def generate_vehicle_id() -> str:
     return str(uuid.uuid4()).replace("-", "")
 
 
+# Global list to track vehicle IDs for reuse
+_reusable_vehicle_ids = []
+
+
 def generate_event(vehicle_id: str, event_time: datetime = None) -> dict:
     """Generate a single vehicle event."""
     if event_time is None:
@@ -116,22 +120,21 @@ def generate_filename(file_type: str, timestamp: datetime = None) -> str:
     return f"{file_type}_{timestamp_str}.json"
 
 
-def cleanup_all_data():
-    """Clean all data folders, datalake, and database before generating new data."""
-    print("Cleaning all existing data...")
+def cleanup_all_data(clean_datalake=False):
+    """Clean all data folders and optionally datalake, but NOT database (metadata preserved).
+    
+    Args:
+        clean_datalake: If True, also cleans the datalake. Default: False.
+    """
+    print("Cleaning all existing data (keeping database)...")
     
     # Clean data folders (use absolute paths from project root)
     project_root = Path(__file__).parent.parent
     data_folders = [
-        project_root / "data" / "incoming",
+        project_root / "data" / "source_data" / "incoming",
         project_root / "data" / "source_data" / "processing",
         project_root / "data" / "source_data" / "failed",
-        project_root / "data" / "source_data" / "error",
-        project_root / "data" / "processed",
     ]
-    
-    # Clean datalake (recursive - contains partitioned data)
-    datalake_path = project_root / "data" / "datalake"
     
     for folder in data_folders:
         if folder.exists():
@@ -140,21 +143,21 @@ def cleanup_all_data():
         folder.mkdir(parents=True, exist_ok=True)
         print(f"✓ Created {folder}")
     
-    # Clean datalake (recursive - contains partitioned data)
-    if datalake_path.exists():
-        shutil.rmtree(datalake_path)
-        print(f"✓ Removed datalake: {datalake_path}")
-    datalake_path.mkdir(parents=True, exist_ok=True)
-    print(f"✓ Created datalake: {datalake_path}")
+    # Clean datalake only if requested
+    if clean_datalake:
+        datalake_path = project_root / "data" / "datalake"
+        
+        if datalake_path.exists():
+            shutil.rmtree(datalake_path)
+            print(f"✓ Removed datalake: {datalake_path}")
+        datalake_path.mkdir(parents=True, exist_ok=True)
+        print(f"✓ Created datalake: {datalake_path}")
+    else:
+        print("✓ Datalake kept (not cleaned)")
     
-    # Clean database
-    if db_driver.database_url.startswith("sqlite"):
-        db_path = Path(db_driver.database_url.replace("sqlite:///", ""))
-        if db_path.exists():
-            db_path.unlink()
-            print(f"✓ Removed database: {db_path}")
-    
-    print("✓ All data cleaned\n")
+    # Database cleanup removed - keep existing metadata
+    print("✓ Database kept (metadata preserved)")
+    print("✓ All data cleaned (except database)\n")
 
 
 def setup_metadata():
@@ -227,14 +230,24 @@ def main():
     parser.add_argument("--continuous", action="store_true", help="Generate continuously")
     parser.add_argument("--retroactive", action="store_true", help="Generate retroactive files")
     parser.add_argument("--skip-metadata", action="store_true", help="Skip metadata setup")
-    parser.add_argument("--no-cleanup", action="store_true", help="Skip cleanup of existing data")
+    parser.add_argument("--cleanup", action="store_true", help="Clean source data folders before generating (default: no cleanup)")
+    parser.add_argument("--clean-datalake", action="store_true", help="Also clean datalake when using --cleanup (default: datalake is preserved)")
     parser.add_argument("--num-files", type=int, default=5, help="Number of files to generate for each type (default: 5)")
+    parser.add_argument("--date", type=str, help="Generate data for specific date (YYYY-MM-DD). Default: today")
+    parser.add_argument("--days-ago", type=int, help="Generate data for N days ago (e.g., --days-ago 1 for yesterday)")
+    parser.add_argument("--type", type=str, choices=["events", "status", "both"], default="both", 
+                        help="Type of files to generate: 'events', 'status', or 'both' (default: both)")
+    parser.add_argument("--same-vehicle", action="store_true",
+                        help="Generate multiple events for the same vehicle_id (useful for testing daily summary 'last_event_type')")
 
     args = parser.parse_args()
 
-    # Clean all existing data before generating new data
-    if not args.no_cleanup:
-        cleanup_all_data()
+    # Clean all existing data before generating new data (only if --cleanup is provided)
+    if args.cleanup:
+        cleanup_all_data(clean_datalake=args.clean_datalake)
+    else:
+        print("ℹ️  No cleanup requested - existing data will be preserved")
+        print("   Use --cleanup to clean source data folders, --clean-datalake to also clean datalake\n")
 
     # Setup metadata for happy flow
     if not args.skip_metadata:
@@ -242,62 +255,119 @@ def main():
 
     # Use absolute path from project root
     project_root = Path(__file__).parent.parent
-    incoming_folder = project_root / "data" / "incoming"
+    # Use absolute path to ensure we're in project root, not scripts folder
+    incoming_folder = project_root / "data" / "source_data" / "incoming"
     incoming_folder.mkdir(parents=True, exist_ok=True)
 
+    # Determine target date for data generation (default: today)
+    if args.date:
+        try:
+            target_date = datetime.strptime(args.date, "%Y-%m-%d").date()
+            base_timestamp = datetime.combine(target_date, datetime.now().time())
+        except ValueError:
+            print(f"Error: Invalid date format '{args.date}'. Use YYYY-MM-DD")
+            return
+    elif args.days_ago:
+        target_date = datetime.now().date() - timedelta(days=args.days_ago)
+        base_timestamp = datetime.combine(target_date, datetime.now().time())
+    else:
+        # Default to today
+        target_date = datetime.now().date()
+        base_timestamp = datetime.now()
+    
+    # Determine which file types to generate
+    should_generate_events = args.type in ["events", "both"]
+    should_generate_status = args.type in ["status", "both"]
+    
+    # Initialize reusable vehicle IDs if same-vehicle mode
+    if args.same_vehicle:
+        # Create a small pool of vehicle IDs (2-3) so they repeat across files
+        # This ensures the same vehicle appears in multiple files for testing aggregation
+        num_vehicles = min(3, max(2, args.num_files // 2))  # Use 2-3 vehicles so they repeat
+        global _reusable_vehicle_ids
+        _reusable_vehicle_ids = [generate_vehicle_id() for _ in range(num_vehicles)]
+        print(f"🔁 Same-vehicle mode: Will reuse {len(_reusable_vehicle_ids)} vehicle IDs across {args.num_files} files")
+        print(f"   Each vehicle will appear in multiple files to test 'last_event_type' aggregation\n")
+    
     if args.continuous:
         print(f"Generating files every {args.interval} seconds. Press Ctrl+C to stop.")
         try:
             while True:
-                timestamp = datetime.now()
+                timestamp = base_timestamp if not args.retroactive else datetime.now()
                 if args.retroactive and random.random() < 0.3:
                     timestamp = timestamp - timedelta(days=random.randint(1, 7))
 
-                # Generate events file
-                filename = generate_filename("vehicles_events", timestamp)
-                file_path = incoming_folder / filename
-                events = [generate_event(generate_vehicle_id(), timestamp) for _ in range(random.randint(1, 10))]
-                s3_driver.write_file(str(file_path), json.dumps({"vehicles_events": events}, indent=2).encode())
-                print(f"✓ Generated: {filename} ({len(events)} events)")
+                    if should_generate_events:
+                        # Generate events file
+                        filename = generate_filename("vehicles_events", timestamp)
+                        file_path = incoming_folder / filename
+                        # Use same vehicle IDs if same-vehicle mode, otherwise generate new ones
+                        if args.same_vehicle and _reusable_vehicle_ids:
+                            # Cycle through vehicle IDs for continuous mode too
+                            vehicle_id = random.choice(_reusable_vehicle_ids)  # For continuous, random is OK
+                            events = [generate_event(vehicle_id, timestamp) for _ in range(random.randint(1, 10))]
+                        else:
+                            events = [generate_event(generate_vehicle_id(), timestamp) for _ in range(random.randint(1, 10))]
+                        s3_driver.write_file(str(file_path), json.dumps({"vehicles_events": events}, indent=2).encode())
+                        print(f"✓ Generated: {filename} ({len(events)} events)")
 
-                # Generate status file
-                filename = generate_filename("vehicles_status", timestamp)
-                file_path = incoming_folder / filename
-                statuses = [generate_status(generate_vehicle_id(), timestamp) for _ in range(random.randint(1, 5))]
-                s3_driver.write_file(str(file_path), json.dumps({"vehicle_status": statuses}, indent=2).encode())
-                print(f"✓ Generated: {filename} ({len(statuses)} statuses)")
+                if should_generate_status:
+                    # Generate status file
+                    filename = generate_filename("vehicles_status", timestamp)
+                    file_path = incoming_folder / filename
+                    statuses = [generate_status(generate_vehicle_id(), timestamp) for _ in range(random.randint(1, 5))]
+                    s3_driver.write_file(str(file_path), json.dumps({"vehicle_status": statuses}, indent=2).encode())
+                    print(f"✓ Generated: {filename} ({len(statuses)} statuses)")
 
                 time.sleep(args.interval)
         except KeyboardInterrupt:
             print("\nStopped generating files.")
     else:
-        # Generate multiple files of each type with different timestamps and events
-        print(f"Generating {args.num_files} files of each type...")
-        
-        base_timestamp = datetime.now()
+        # Generate multiple files with different timestamps
+        target_date_str = base_timestamp.strftime("%Y-%m-%d")
+        type_str = args.type
+        print(f"Generating {args.num_files} {type_str} file(s) for date: {target_date_str}...")
         
         for i in range(args.num_files):
-            # Vary timestamps slightly (spread over last hour)
-            timestamp_offset = timedelta(minutes=random.randint(-60, 0))
-            timestamp = base_timestamp + timestamp_offset
+            # Vary timestamps throughout the target date (spread over the day)
+            # In same-vehicle mode, spread events across the day to test "last_event_type"
+            if args.same_vehicle:
+                # Spread events evenly across the day for better testing
+                hours_offset = int((i * 24) / args.num_files)  # Distribute evenly
+                minutes_offset = random.randint(0, 59)
+            else:
+                hours_offset = random.randint(0, 23)
+                minutes_offset = random.randint(0, 59)
+            timestamp = base_timestamp.replace(hour=hours_offset, minute=minutes_offset, second=0, microsecond=0)
             
-            # Generate events file with varying number of events
-            filename = generate_filename("vehicles_events", timestamp)
-            file_path = incoming_folder / filename
-            num_events = random.randint(3, 15)
-            events = [generate_event(generate_vehicle_id(), timestamp) for _ in range(num_events)]
-            s3_driver.write_file(str(file_path), json.dumps({"vehicles_events": events}, indent=2).encode())
-            print(f"✓ Generated: {filename} ({len(events)} events)")
+            if should_generate_events:
+                # Generate events file with varying number of events
+                filename = generate_filename("vehicles_events", timestamp)
+                file_path = incoming_folder / filename
+                num_events = random.randint(3, 15)
+                # Use same vehicle IDs if same-vehicle mode, otherwise generate new ones
+                if args.same_vehicle and _reusable_vehicle_ids:
+                    # Cycle through vehicle IDs so each appears in multiple files
+                    # This ensures the same vehicle has events across different times of the day
+                    vehicle_id = _reusable_vehicle_ids[i % len(_reusable_vehicle_ids)]
+                    events = [generate_event(vehicle_id, timestamp) for _ in range(num_events)]
+                    print(f"✓ Generated: {filename} ({len(events)} events for vehicle {vehicle_id[:8]}... at {timestamp.strftime('%H:%M')})")
+                else:
+                    events = [generate_event(generate_vehicle_id(), timestamp) for _ in range(num_events)]
+                    print(f"✓ Generated: {filename} ({len(events)} events)")
+                s3_driver.write_file(str(file_path), json.dumps({"vehicles_events": events}, indent=2).encode())
             
-            # Generate status file with varying number of statuses
-            filename = generate_filename("vehicles_status", timestamp)
-            file_path = incoming_folder / filename
-            num_statuses = random.randint(2, 8)
-            statuses = [generate_status(generate_vehicle_id(), timestamp) for _ in range(num_statuses)]
-            s3_driver.write_file(str(file_path), json.dumps({"vehicle_status": statuses}, indent=2).encode())
-            print(f"✓ Generated: {filename} ({len(statuses)} statuses)")
+            if should_generate_status:
+                # Generate status file with varying number of statuses
+                filename = generate_filename("vehicles_status", timestamp)
+                file_path = incoming_folder / filename
+                num_statuses = random.randint(2, 8)
+                statuses = [generate_status(generate_vehicle_id(), timestamp) for _ in range(num_statuses)]
+                s3_driver.write_file(str(file_path), json.dumps({"vehicle_status": statuses}, indent=2).encode())
+                print(f"✓ Generated: {filename} ({len(statuses)} statuses)")
         
-        print(f"\n✓ Happy flow setup complete! Generated {args.num_files * 2} files in {incoming_folder}")
+        total_files = args.num_files * (should_generate_events + should_generate_status)
+        print(f"\n✓ Happy flow setup complete! Generated {total_files} file(s) in {incoming_folder}")
 
 
 if __name__ == "__main__":

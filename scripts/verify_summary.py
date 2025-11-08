@@ -9,7 +9,7 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 import pyarrow.parquet as pq
 
 # Read the summary table
-summary_file = Path("data/datalake/summary/daily_summary/date=2025-11-07/daily_summary_2025-11-07.parquet")
+summary_file = Path("data/datalake/dwh/daily_summary/date=2025-11-07/daily_summary_2025-11-07.parquet")
 
 if not summary_file.exists():
     print(f"❌ Summary file not found: {summary_file}")

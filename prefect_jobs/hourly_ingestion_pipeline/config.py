@@ -10,17 +10,19 @@ _DEFAULT_DB_PATH = Path.home() / "data" / "lemonade" / "metadata.db"
 _DEFAULT_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
 _DEFAULT_DB_URL = f"sqlite:///{_DEFAULT_DB_PATH}"
 
-# File paths (resolve to absolute paths)
-# New structure: incoming/ for all incoming files, source_data/ for processing/failed/error
-_INCOMING_FOLDER_STR = os.environ.get("INCOMING_FOLDER", "./data/incoming")
-INCOMING_FOLDER = Path(_INCOMING_FOLDER_STR).resolve()
+# File paths (resolve to absolute paths relative to project root)
+# Structure: source_data/ contains incoming, processing, failed, processed
+# Get project root (parent of prefect_jobs folder)
+_PROJECT_ROOT = Path(__file__).parent.parent.parent
 _SOURCE_DATA_BASE_STR = os.environ.get("SOURCE_DATA_BASE", "./data/source_data")
-SOURCE_DATA_BASE = Path(_SOURCE_DATA_BASE_STR).resolve()
+if Path(_SOURCE_DATA_BASE_STR).is_absolute():
+    SOURCE_DATA_BASE = Path(_SOURCE_DATA_BASE_STR)
+else:
+    SOURCE_DATA_BASE = (_PROJECT_ROOT / _SOURCE_DATA_BASE_STR).resolve()
+INCOMING_FOLDER = SOURCE_DATA_BASE / "incoming"
 PROCESSING_FOLDER = SOURCE_DATA_BASE / "processing"
 FAILED_FOLDER = SOURCE_DATA_BASE / "failed"
-ERROR_FOLDER = SOURCE_DATA_BASE / "error"
-_PROCESSED_FOLDER_STR = os.environ.get("PROCESSED_FOLDER", "./data/processed")
-PROCESSED_FOLDER = Path(_PROCESSED_FOLDER_STR).resolve()
+PROCESSED_FOLDER = SOURCE_DATA_BASE / "processed"
 
 # File type patterns
 EVENTS_FILE_PATTERN = "vehicles_events_*.json"
@@ -32,7 +34,11 @@ STATUS_FILE_PATTERN = "vehicles_status_*.json"
 if ENV == "production":
     DATALAKE_BASE = Path(os.environ.get("DATALAKE_BASE", "s3://lemonade-datalake"))
 else:
-    DATALAKE_BASE = Path(os.environ.get("DATALAKE_BASE", "./data/datalake"))
+    _DATALAKE_BASE_STR = os.environ.get("DATALAKE_BASE", "./data/datalake")
+    if Path(_DATALAKE_BASE_STR).is_absolute():
+        DATALAKE_BASE = Path(_DATALAKE_BASE_STR)
+    else:
+        DATALAKE_BASE = (_PROJECT_ROOT / _DATALAKE_BASE_STR).resolve()
 DATALAKE_EVENTS_TABLE = DATALAKE_BASE / "raw_data" / "vehicle_events"
 DATALAKE_STATUS_TABLE = DATALAKE_BASE / "raw_data" / "vehicle_status"
 

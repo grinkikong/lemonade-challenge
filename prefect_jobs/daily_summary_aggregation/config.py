@@ -13,12 +13,19 @@ _DEFAULT_DB_URL = f"sqlite:///{_DEFAULT_DB_PATH}"
 # Datalake configuration
 # Local: Parquet files in local filesystem
 # Production: Iceberg tables in S3, managed by AWS Glue Catalog
+# Get project root (parent of prefect_jobs folder) to ensure correct path resolution
+_PROJECT_ROOT = Path(__file__).parent.parent.parent
+
 if ENV == "production":
     DATALAKE_BASE = Path(os.environ.get("DATALAKE_BASE", "s3://lemonade-datalake"))
 else:
-    DATALAKE_BASE = Path(os.environ.get("DATALAKE_BASE", "./data/datalake"))
+    _DATALAKE_BASE_STR = os.environ.get("DATALAKE_BASE", "./data/datalake")
+    if Path(_DATALAKE_BASE_STR).is_absolute():
+        DATALAKE_BASE = Path(_DATALAKE_BASE_STR)
+    else:
+        DATALAKE_BASE = (_PROJECT_ROOT / _DATALAKE_BASE_STR).resolve()
 DATALAKE_EVENTS_TABLE = DATALAKE_BASE / "raw_data" / "vehicle_events"
-DATALAKE_SUMMARY_TABLE = DATALAKE_BASE / "summary" / "daily_summary"
+DATALAKE_SUMMARY_TABLE = DATALAKE_BASE / "dwh" / "daily_summary"
 
 # Iceberg configuration (production - not used in this challenge)
 # In production: Would use Iceberg tables in S3 with AWS Glue Catalog

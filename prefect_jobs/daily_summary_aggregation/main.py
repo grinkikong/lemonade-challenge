@@ -102,5 +102,11 @@ def daily_summary_aggregation_flow(target_date: str | None = None):
 
 
 if __name__ == "__main__":
-    daily_summary_aggregation_flow()
+    import sys
+    
+    # Allow passing date as command line argument
+    # Usage: python main.py [YYYY-MM-DD]
+    # Example: python main.py 2025-11-08
+    target_date = sys.argv[1] if len(sys.argv) > 1 else '2025-11-08'
+    daily_summary_aggregation_flow(target_date=target_date)
 

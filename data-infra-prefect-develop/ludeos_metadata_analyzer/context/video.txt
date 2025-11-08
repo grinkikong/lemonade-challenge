@@ -1,6 +1,0 @@
-Your'e going to analyze a video based on multiple key frames taken from it.
-Based on these observations, please provide a cohesive summary of what's happening in this video clip.
-
-Describe the setting, characters, actions, weapons, environment and any notable elements.
-Focus on the narrative flow and key visual elements throughout the sequence
-Make sure to keep it in gamers language but still keep it simple so anyone can easily understand what is the content of the video

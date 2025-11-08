@@ -10,7 +10,6 @@ from prefect_jobs.hourly_ingestion_pipeline.config import (
     PROCESSING_FOLDER,
     PROCESSED_FOLDER,
     FAILED_FOLDER,
-    ERROR_FOLDER,
     DATALAKE_BASE,
     ENV,
 )
@@ -121,24 +120,9 @@ def process_files_batch_with_spark(
         result = process_files_with_pyspark(
             file_paths, file_type, output_table, metadata_dict
         )
-        # If PySpark failed due to Java, it should have fallen back to pyarrow
-        # Check if result indicates we should retry with pyarrow
-        if result.get("status") == "failed":
-            error_str = str(result.get("error", "")).lower()
-            if "java" in error_str or "gateway" in error_str or "jvm" in error_str:
-                # Fall back to pyarrow
-                from prefect_jobs.hourly_ingestion_pipeline.utils import process_files_simulation
-                logger.info("Java/PySpark unavailable, falling back to pyarrow for Parquet generation")
-                result = process_files_simulation(file_paths, file_type, output_table, metadata_dict)
         return result
 
     except Exception as e:
-        error_str = str(e).lower()
-        if "java" in error_str or "gateway" in error_str or "jvm" in error_str:
-            # Fall back to pyarrow
-            logger.info("Java/PySpark unavailable, falling back to pyarrow for Parquet generation")
-            from prefect_jobs.hourly_ingestion_pipeline.utils import process_files_simulation
-            return process_files_simulation(file_paths, file_type, output_table, metadata_dict)
         logger.error(f"Spark processing failed: {e}")
         logger.error(f"Full traceback:\n{traceback.format_exc()}")
         return {"status": "failed", "error": str(e), "records_count": 0}
@@ -169,46 +153,36 @@ def process_folder_with_spark(processing_folder: str) -> dict:
     
     output_table = DATALAKE_BASE / "raw_data" / file_type
 
+    # Process all files and write to Parquet datalake
     result = process_files_batch_with_spark(
         files, file_type, output_table, metadata_dict
     )
     
+    # Task 2 only processes and writes to Parquet - cleanup is done in Task 3
     if result["status"] == "success":
-        for file_path in files:
-            file_name = Path(file_path).name
-            dest_path = PROCESSED_FOLDER / file_type / file_name
-            try:
-                s3_driver.move_file(file_path, str(dest_path))
-            except Exception as move_error:
-                logger.error(f"Failed to move {file_name} to processed folder: {move_error}")
-        
+        # All files successfully loaded to Parquet
+        # Files remain in processing/ folder - Task 3 will move them to processed/
         results = {
             "processed": len(files),
             "failed": 0,
             "records_count": result.get("records_count", 0)
         }
         logger.info(
-            f"Successfully processed {len(files)} files: {result.get('records_count', 0)} records"
-        )
-    elif result["status"] == "schema_validation_failed":
-        # Schema validation failed - move to error folder
-        error_msg = result.get('error', 'Schema validation failed')
-        for file_path in files:
-            file_name = Path(file_path).name
-            dest_path = ERROR_FOLDER / file_type / file_name
-            try:
-                s3_driver.move_file(file_path, str(dest_path))
-            except Exception as move_error:
-                logger.error(f"Failed to move {file_name} to error folder: {move_error}")
-        
-        results = {"processed": 0, "failed": len(files), "schema_errors": len(files)}
-        logger.error(
-            f"ALERT: Schema validation failed for {len(files)} files. "
-            f"Error: {error_msg}. All files moved to error folder."
+            f"✓ Successfully processed {len(files)} files: {result.get('records_count', 0)} records written to Parquet. "
+            f"Files remain in processing folder - Task 3 will move to processed/ after verification."
         )
     else:
-        # Other processing errors - move to failed folder
+        # Any error (schema validation, processing, etc.) - move ALL files from this chunk to failed
+        # One error = entire chunk fails (atomic operation)
         error_msg = result.get('error', 'Unknown error')
+        error_type = result.get("status", "failed")
+        
+        logger.error(
+            f"Processing failed for chunk {file_type} in {processing_folder}. "
+            f"Error type: {error_type}, Error: {error_msg}. "
+            f"Moving all {len(files)} files to failed folder."
+        )
+        
         for file_path in files:
             file_name = Path(file_path).name
             dest_path = FAILED_FOLDER / file_type / file_name
@@ -217,10 +191,16 @@ def process_folder_with_spark(processing_folder: str) -> dict:
             except Exception as move_error:
                 logger.error(f"Failed to move {file_name} to failed folder: {move_error}")
         
-        results = {"processed": 0, "failed": len(files)}
+        # Track schema errors separately for reporting
+        schema_errors = len(files) if error_type == "schema_validation_failed" else 0
+        results = {
+            "processed": 0,
+            "failed": len(files),
+            "schema_errors": schema_errors
+        }
         logger.error(
-            f"ALERT: Batch processing failed for {len(files)} files. "
-            f"Error: {error_msg}. All files moved to failed folder."
+            f"ALERT: Chunk processing failed - {len(files)} files moved to failed folder. "
+            f"Error: {error_msg}"
         )
 
     if results.get("schema_errors", 0) > 0:
