@@ -1,6 +1,6 @@
 # Lemonade Data Engineering Challenge
 
-Data ingestion pipeline for vehicle events and status data, following a "Prefect style" architecture. The pipeline handles unbounded data streams, processes files from S3 (or local folders for development), and generates daily summaries.
+Data ingestion pipeline for vehicle events and status data. The pipeline handles unbounded data streams, processes files from S3 (or local folders for development), and generates daily summaries. Files are validated (schema validation, naming convention, etc.) and moved to `processing/` or `failed/` accordingly. Processed data is stored as Parquet files in the datalake (partitioned by date) and managed by DuckDB for querying.
 
 ## Architecture
 
@@ -9,13 +9,13 @@ Data ingestion pipeline for vehicle events and status data, following a "Prefect
 ```
 Incoming Files
     ↓
-[Task 1: File Discovery from incoming folder] → Move to processing/ or failed/
+[Task 1: File Discovery] → Validate naming convention, move to processing/ or failed/
     ↓
-[Task 2: Spark Processing] → Read from processing/, validate, write to Parquet datalake
+[Task 2: Spark Processing] → Read from processing/, validate schemas, write to Parquet datalake
     ↓
 [Task 3: Cleanup] → Move successfully processed files to processed/
     ↓
-Parquet Datalake (partitioned by date)
+Parquet Datalake (partitioned by date) → Managed by DuckDB for querying
     ↓
 [Daily Summary Job] → Aggregate and create daily summary tables
 ```
@@ -24,12 +24,41 @@ Parquet Datalake (partitioned by date)
 
 - **Orchestration**: Prefect 2.x
 - **Processing**: Apache Spark (PySpark) - local mode for development
+  - **Why Spark?**: Spark was chosen to support scale with many events. In production, Spark runs on AWS EMR (Elastic MapReduce) clusters, enabling distributed processing of large volumes of data across multiple nodes. This architecture allows the pipeline to handle:
+    - High-throughput batch processing of millions of events
+    - Parallel processing across multiple partitions
+    - Efficient memory management for large datasets
+    - Horizontal scaling by adding more EMR nodes as data volume grows
 - **Storage**: 
   - Local: Parquet files in filesystem
   - Production: Iceberg tables in S3 (planned)
-- **Metadata**: SQLite (local) / PostgreSQL (production)
 - **Query Engine**: DuckDB for local exploration
 - **Language**: Python 3.11
+
+## Ingestion Process Assumptions
+
+The ingestion pipeline is designed with the following assumptions:
+
+1. **Bulk File Processing**: Files arrive in bulk with chunks of events, meaning each file contains multiple events (not single events per file). If the data pattern changes to single events per file or real-time streaming, the system should be migrated to a streaming application (e.g., Kafka + Spark Streaming, AWS Lambda, etc.).
+
+2. **Naming Convention**: Files follow a strict naming pattern: `{file_type}_{timestamp}.json` (e.g., `vehicles_events_20251108120000.json`). Files that don't match this pattern are moved to `failed/` folder.
+
+3. **Schema Stability**: Schema changes are relatively infrequent. When schema changes occur, they are managed through explicit schema validation. For v2, dynamic schema management via iceberg tables is planned 
+
+4. **Late-Arriving Data**: Late-arriving data is expected within a 48-hour window. Data arriving after 48 hours may require manual backfill processing.
+
+5. **Partitioning Strategy**: Raw data is partitioned by `date` based on the file's timestamp (when the file was created/arrived), not the `event_time` field. This allows efficient processing of late-arriving data where `event_time` may differ from the partition date.
+
+6. **Idempotency**: Processing is designed to be idempotent - files can be reprocessed if needed without creating duplicates (files are moved, not copied, and processing status is tracked via folder location).
+
+7. **Batch Processing**: The system is designed for batch processing (hourly runs). For real-time or near-real-time requirements, a streaming architecture would be more appropriate.
+
+8. **File Movement**: Files are moved (not copied) between folders to:
+   - Avoid reprocessing the same file multiple times
+   - Track processing status via folder location
+   - Ensure data consistency
+
+9. **Error Handling**: Files that fail validation (schema, naming convention, etc.) are moved to `failed/` folder with error details. Failed files require manual investigation and reprocessing after fixes.
 
 ## Project Structure
 
@@ -243,30 +272,17 @@ poetry run python scripts/generate_data.py --num-files 5 --no-cleanup
 
 ## Configuration
 
-Configuration is managed through environment variables (see `.env.example`):
-
-- `ENV`: Environment (`local` or `production`)
-- `DATABASE_URL`: Database connection string
-- `SOURCE_DATA_BASE`: Base path for source data (default: `./data/source_data`)
-- `DATALAKE_BASE`: Base path for datalake (default: `./data/datalake`)
-- `SPARK_MASTER`: Spark master URL (default: `local[*]`)
-- `SPARK_APP_NAME`: Spark application name
-- `AWS_REGION`: AWS region (production)
-- `S3_BUCKET`: S3 bucket name (production)
-
 **Note**: Ensure `JAVA_HOME` is set in your environment. Java is required for Spark to run.
 
 ## File Formats
 
 ### Supported File Types
 
-The system supports **dynamic file types** managed through the `table_metadata` table in SQLite (this project). File type definitions (schema structure and processing configuration) are stored in the database, allowing new file types to be added without code changes.
-
 **Currently supported file types (v1 - hardcoded):**
 - `vehicle_events`: Vehicle event data
 - `vehicle_status`: Vehicle status data
 
-**TODO v2**: Reintroduce dynamic metadata table support for full schema validation and dynamic file type management.
+**Note**: File types are currently hardcoded in the configuration. Dynamic file type management is planned for v2 (see Next Phases section below).
 
 ### Vehicle Events Format
 
@@ -298,6 +314,27 @@ The system supports **dynamic file types** managed through the `table_metadata` 
 }
 ```
 
+## Data Lake Structure
+
+**Note**: This implementation uses local **Parquet files (partitioned by date) managed by DuckDB** for **development/demonstration purposes only**. In production, data is stored as **Parquet files in S3** (same format), with **table schemas predefined in AWS Glue Catalog as Iceberg tables** for better scalability, ACID transactions, and schema evolution.
+
+### Raw Data (`raw_data`)
+
+- **Location**: `data/datalake/raw_data/` (local) or `s3://lemonade-datalake/raw_data/` (production)
+- **Format**: Parquet files (same format in dev and production), partitioned by date
+- **Table Definition**: Local DuckDB views (dev) or Iceberg tables in AWS Glue Catalog (production)
+- **Tables**:
+  - `vehicle_events/`: Partitioned by `date` column
+  - `vehicle_status/`: Partitioned by `date` column
+
+### Reports (`reports`)
+
+- **Location**: `data/datalake/reports/` (local) or `s3://lemonade-datalake/reports/` (production)
+- **Format**: Parquet files (same format in dev and production), partitioned by day
+- **Table Definition**: Local DuckDB views (dev) or Iceberg tables in AWS Glue Catalog (production)
+- **Tables**:
+  - `daily_summary/`: Daily aggregated summaries, partitioned by `day` (derived from `event_time`, not processing date)
+
 ## Prefect Jobs
 
 ### Files Ingestion Pipeline (`files_ingester`)
@@ -305,8 +342,8 @@ The system supports **dynamic file types** managed through the `table_metadata` 
 **Schedule**: Every hour at :00
 
 **Tasks**:
-1. **File Discovery** (`discover_and_move_files`): Scans `incoming/` folder, detects file types, moves to `processing/` or `failed/`
-2. **Spark Processing** (`process_all_folders_with_spark`): Processes all files in `processing/` folders, validates schemas, writes to Parquet datalake
+1. **File Discovery** (`discover_and_move_files`): Scans `incoming/` folder, validates naming convention, detects file types, moves to `processing/` or `failed/` based on validation results
+2. **Spark Processing** (`process_all_folders_with_spark`): Processes all files in `processing/` folders, validates schemas, writes to Parquet datalake (partitioned by date)
 3. **Cleanup** (`cleanup_processed_files`): Moves successfully processed files from `processing/` to `processed/`
 
 **After first ingestion**: Run `poetry run python scripts/create_tables.py` to create DuckDB views. Views will automatically discover new Parquet files as they are created.
@@ -366,27 +403,6 @@ poetry run python scripts/backfill_daily_summary.py --start-date 2025-01-01 --en
 ```
 
 **Note**: The backfill process uses the same aggregation logic as the daily job but processes multiple days in sequence, making it suitable for initial data loads or reprocessing historical periods.
-
-## Data Lake Structure
-
-**Note**: This implementation uses local Parquet files with DuckDB views for **development/demonstration purposes only**. In production, data is stored as **Parquet files in S3** (same format), with **table schemas predefined in AWS Glue Catalog as Iceberg tables** for better scalability, ACID transactions, and schema evolution.
-
-### Raw Data (`raw_data`)
-
-- **Location**: `data/datalake/raw_data/` (local) or `s3://lemonade-datalake/raw_data/` (production)
-- **Format**: Parquet files (same format in dev and production), partitioned by date
-- **Table Definition**: Local DuckDB views (dev) or Iceberg tables in AWS Glue Catalog (production)
-- **Tables**:
-  - `vehicle_events/`: Partitioned by `date` column
-  - `vehicle_status/`: Partitioned by `date` column
-
-### Reports (`reports`)
-
-- **Location**: `data/datalake/reports/` (local) or `s3://lemonade-datalake/reports/` (production)
-- **Format**: Parquet files (same format in dev and production), partitioned by day
-- **Table Definition**: Local DuckDB views (dev) or Iceberg tables in AWS Glue Catalog (production)
-- **Tables**:
-  - `daily_summary/`: Daily aggregated summaries, partitioned by `day` (derived from `event_time`, not processing date)
 
 ## Querying the Data Lake
 
@@ -509,6 +525,29 @@ AWS_REGION=us-east-1
 ICEBERG_CATALOG_URI=...
 ICEBERG_WAREHOUSE=s3://lemonade-datalake/warehouse
 ```
+
+## Next Phases
+
+The following enhancements are planned for future versions:
+
+1. **Tests for CI/CD**: 
+   - Unit tests for all pipeline components
+   - Integration tests for end-to-end data flow
+   - Schema validation tests
+   - CI/CD pipeline configuration (GitHub Actions, GitLab CI, etc.)
+
+2. **Persistent Iceberg Tables**:
+   - **Option A**: Iceberg tables in S3 managed by AWS Glue Catalog for the datalake
+   - **Option B**: Snowflake DB (if costs are acceptable) for both raw data and aggregation layer
+   - Benefits: ACID transactions, schema evolution, time travel, better query performance
+
+3. **Config DB for Dynamic File Types**:
+   - Configuration database to manage dynamic types of files
+   - Clear definition of target table mappings in DuckDB (and production query engines)
+   - Schema definitions stored in database (PostgreSQL in production)
+   - Support for adding new file types without code changes
+   - Status management (active/inactive) for file types
+   - Processing configuration per file type (partitioning, transformations, etc.)
 
 ## License
 
