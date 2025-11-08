@@ -2,18 +2,17 @@
 """Test data generator for the data ingestion pipeline.
 
 Generates realistic JSON files for vehicles_events and vehicles_status.
-Creates all necessary metadata in database for happy flow.
 Can run continuously to generate files every X seconds.
 
 Usage:
-    # Generate 5 files of each type and setup metadata (default)
-    python scripts/generate_test_data.py
+    # Generate 5 files of each type (default)
+    python scripts/generate_data.py
 
     # Generate 10 files of each type
-    python scripts/generate_test_data.py --num-files 10
+    python scripts/generate_data.py --num-files 10
 
     # Generate files continuously every 10 seconds
-    python scripts/generate_test_data.py --interval 10 --continuous
+    python scripts/generate_data.py --interval 10 --continuous
 """
 
 import sys
@@ -30,7 +29,6 @@ import uuid
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from data_utils.aws.s3_driver import s3_driver
-from data_utils.database.drivers import db_driver
 from project_utils import ENV
 
 # Sample data
@@ -58,6 +56,9 @@ def generate_vehicle_id() -> str:
 
 # Global list to track vehicle IDs for reuse
 _reusable_vehicle_ids = []
+
+# Global counter for generating new vehicle IDs when needed
+_vehicle_id_counter = 0
 
 
 def generate_event(vehicle_id: str, event_time: datetime = None) -> dict:
@@ -160,82 +161,17 @@ def cleanup_all_data(clean_datalake=False):
     print("✓ All data cleaned (except database)\n")
 
 
-def setup_metadata():
-    """Create metadata entries in database for happy flow.
-    
-    Note: Metadata setup is optional for v1 (simplified approach).
-    The pipeline now uses hardcoded file type definitions.
-    Metadata will be used in v2 for dynamic file type support.
-    """
-    print("Setting up metadata in database...")
-    
-    # Ensure database tables exist
-    if db_driver.database_url.startswith("sqlite"):
-        db_path = Path(db_driver.database_url.replace("sqlite:///", ""))
-        db_path.parent.mkdir(parents=True, exist_ok=True)
-    db_driver.create_tables()
-    print("✓ Database tables ready")
-    
-    # Vehicle events metadata
-    vehicle_events_schema = {
-        "type": "object",
-        "properties": {
-            "vehicle_id": {"type": "string"},
-            "event_time": {"type": "string", "format": "date-time"},
-            "event_source": {"type": "string"},
-            "event_type": {"type": "string"},
-            "event_value": {"type": ["string", "null"]},
-            "event_extra_data": {"type": ["object", "null"]}
-        },
-        "required": ["vehicle_id", "event_time", "event_source", "event_type"]
-    }
-    
-    db_driver.get_or_create_table_metadata(
-        table_name="vehicle_events",
-        file_type="vehicle_events",
-        schema_definition=vehicle_events_schema,
-        partition_column="date",
-        processing_config={"mode": "append", "format": "parquet"},
-        description="Vehicle events table - stores all vehicle events",
-        status="active"
-    )
-    print("✓ Created metadata for vehicle_events")
-    
-    # Vehicle status metadata
-    vehicle_status_schema = {
-        "type": "object",
-        "properties": {
-            "vehicle_id": {"type": "string"},
-            "report_time": {"type": "string", "format": "date-time"},
-            "status_source": {"type": "string"},
-            "status": {"type": "string"}
-        },
-        "required": ["vehicle_id", "report_time", "status_source", "status"]
-    }
-    
-    db_driver.get_or_create_table_metadata(
-        table_name="vehicle_status",
-        file_type="vehicle_status",
-        schema_definition=vehicle_status_schema,
-        partition_column="date",
-        processing_config={"mode": "append", "format": "parquet"},
-        description="Vehicle status table - stores vehicle status reports",
-        status="active"
-    )
-    print("✓ Created metadata for vehicle_status")
-    print("Metadata setup complete!\n")
-
-
 def main():
     """Main function."""
+    # Declare global variables at the very top
+    global _reusable_vehicle_ids, _vehicle_id_counter
+    
     parser = argparse.ArgumentParser(description="Generate test data files")
     parser.add_argument(
         "--interval", type=int, default=10, help="Interval in seconds (default: 10)"
     )
     parser.add_argument("--continuous", action="store_true", help="Generate continuously")
     parser.add_argument("--retroactive", action="store_true", help="Generate retroactive files")
-    parser.add_argument("--skip-metadata", action="store_true", 
-                        help="Skip metadata setup (v1: metadata is optional, pipeline uses hardcoded config)")
     parser.add_argument("--cleanup", action="store_true", help="Clean source data folders before generating (default: no cleanup)")
     parser.add_argument("--clean-datalake", action="store_true", help="Also clean datalake when using --cleanup (default: datalake is preserved)")
     parser.add_argument("--num-files", type=int, default=5, help="Number of files to generate for each type (default: 5)")
@@ -244,7 +180,11 @@ def main():
     parser.add_argument("--type", type=str, choices=["events", "status", "both"], default="both", 
                         help="Type of files to generate: 'events', 'status', or 'both' (default: both)")
     parser.add_argument("--same-vehicle", action="store_true",
-                        help="Generate multiple events for the same vehicle_id (useful for testing daily summary 'last_event_type')")
+                        help="Generate multiple events for the same vehicle_id (default behavior, this flag is kept for compatibility)")
+    parser.add_argument("--no-same-vehicle", action="store_true",
+                        help="Disable reusing vehicle IDs across files (each file will have unique vehicle IDs)")
+    parser.add_argument("--include-late-arrival", action="store_true",
+                        help="Generate late-arriving data: files with today's timestamp but event_time from yesterday (for testing 2-day lookback)")
 
     args = parser.parse_args()
 
@@ -255,12 +195,6 @@ def main():
         print("ℹ️  No cleanup requested - existing data will be preserved")
         print("   Use --cleanup to clean source data folders, --clean-datalake to also clean datalake\n")
 
-    # Setup metadata (optional for v1 - pipeline uses hardcoded config)
-    # Metadata will be required in v2 for dynamic file type support
-    if not args.skip_metadata:
-        setup_metadata()
-    else:
-        print("ℹ️  Skipping metadata setup (v1 uses hardcoded file type config)\n")
 
     # Use absolute path from project root
     project_root = Path(__file__).parent.parent
@@ -288,15 +222,31 @@ def main():
     should_generate_events = args.type in ["events", "both"]
     should_generate_status = args.type in ["status", "both"]
     
-    # Initialize reusable vehicle IDs if same-vehicle mode
-    if args.same_vehicle:
-        # Create a small pool of vehicle IDs (2-3) so they repeat across files
-        # This ensures the same vehicle appears in multiple files for testing aggregation
-        num_vehicles = min(3, max(2, args.num_files // 2))  # Use 2-3 vehicles so they repeat
-        global _reusable_vehicle_ids
+    # Initialize reusable vehicle IDs (default behavior for testing aggregation)
+    # By default, reuse vehicle IDs across files so we can test daily summary aggregation
+    # Users can disable this by using --no-same-vehicle flag if needed
+    use_same_vehicle = not args.no_same_vehicle  # Default to True (reuse vehicle IDs)
+    
+    if use_same_vehicle:
+        # Create a pool of vehicle IDs that will be reused across files
+        # Generate enough vehicles so we have variety (one new vehicle per 5 events)
+        # But still reuse them across files for aggregation testing
+        # Estimate: if we have 5 files with ~10 events each = 50 events
+        # With 1 vehicle per 5 events = 10 vehicles, but we'll reuse them across files
+        estimated_events_per_file = 10
+        total_estimated_events = args.num_files * estimated_events_per_file
+        # Generate vehicle pool: one vehicle per 5 events, but reuse across files
+        # So we need enough vehicles to cover all events, but they'll repeat across files
+        num_vehicles = max(5, (total_estimated_events // 5))  # At least 5 vehicles, more if needed
         _reusable_vehicle_ids = [generate_vehicle_id() for _ in range(num_vehicles)]
-        print(f"🔁 Same-vehicle mode: Will reuse {len(_reusable_vehicle_ids)} vehicle IDs across {args.num_files} files")
-        print(f"   Each vehicle will appear in multiple files to test 'last_event_type' aggregation\n")
+        _vehicle_id_counter = 0
+        print(f"🔁 Created pool of {len(_reusable_vehicle_ids)} vehicle IDs for reuse across files")
+        print(f"   New vehicle ID every ~5 events, but vehicles will repeat across files")
+        print(f"   This ensures variety while still testing 'last_event_type' aggregation")
+        print(f"   Use --no-same-vehicle to disable this behavior\n")
+    else:
+        _reusable_vehicle_ids = []
+        _vehicle_id_counter = 0
     
     if args.continuous:
         print(f"Generating files every {args.interval} seconds. Press Ctrl+C to stop.")
@@ -310,13 +260,22 @@ def main():
                         # Generate events file
                         filename = generate_filename("vehicles_events", timestamp)
                         file_path = incoming_folder / filename
+                        num_events = random.randint(1, 10)
                         # Use same vehicle IDs if same-vehicle mode, otherwise generate new ones
-                        if args.same_vehicle and _reusable_vehicle_ids:
-                            # Cycle through vehicle IDs for continuous mode too
-                            vehicle_id = random.choice(_reusable_vehicle_ids)  # For continuous, random is OK
-                            events = [generate_event(vehicle_id, timestamp) for _ in range(random.randint(1, 10))]
+                        if use_same_vehicle and _reusable_vehicle_ids:
+                            # Generate events with new vehicle ID every 5 events
+                            events = []
+                            vehicle_id = None
+                            for j in range(num_events):
+                                # New vehicle ID every 5 events
+                                if j % 5 == 0:
+                                    vehicle_id = _reusable_vehicle_ids[_vehicle_id_counter % len(_reusable_vehicle_ids)]
+                                    _vehicle_id_counter += 1
+                                # Add small time offset (seconds) to each event in the same file
+                                event_timestamp = timestamp + timedelta(seconds=j * random.randint(1, 10))
+                                events.append(generate_event(vehicle_id, event_timestamp))
                         else:
-                            events = [generate_event(generate_vehicle_id(), timestamp) for _ in range(random.randint(1, 10))]
+                            events = [generate_event(generate_vehicle_id(), timestamp) for _ in range(num_events)]
                         s3_driver.write_file(str(file_path), json.dumps({"vehicles_events": events}, indent=2).encode())
                         print(f"✓ Generated: {filename} ({len(events)} events)")
 
@@ -337,10 +296,11 @@ def main():
         type_str = args.type
         print(f"Generating {args.num_files} {type_str} file(s) for date: {target_date_str}...")
         
+        # Generate regular files for target date
         for i in range(args.num_files):
             # Vary timestamps throughout the target date (spread over the day)
             # In same-vehicle mode, spread events across the day to test "last_event_type"
-            if args.same_vehicle:
+            if use_same_vehicle:
                 # Spread events evenly across the day for better testing
                 hours_offset = int((i * 24) / args.num_files)  # Distribute evenly
                 minutes_offset = random.randint(0, 59)
@@ -355,13 +315,25 @@ def main():
                 file_path = incoming_folder / filename
                 num_events = random.randint(3, 15)
                 # Use same vehicle IDs if same-vehicle mode, otherwise generate new ones
-                if args.same_vehicle and _reusable_vehicle_ids:
-                    # Cycle through vehicle IDs so each appears in multiple files
-                    # This ensures the same vehicle has events across different times of the day
-                    vehicle_id = _reusable_vehicle_ids[i % len(_reusable_vehicle_ids)]
-                    events = [generate_event(vehicle_id, timestamp) for _ in range(num_events)]
-                    print(f"✓ Generated: {filename} ({len(events)} events for vehicle {vehicle_id[:8]}... at {timestamp.strftime('%H:%M')})")
+                if use_same_vehicle and _reusable_vehicle_ids:
+                    # Generate events with new vehicle ID every 5 events
+                    # This ensures variety while still reusing vehicle IDs across files
+                    events = []
+                    unique_vehicles_in_file = set()
+                    vehicle_id = None
+                    for j in range(num_events):
+                        # New vehicle ID every 5 events (or at start of file)
+                        if j % 5 == 0:
+                            vehicle_id = _reusable_vehicle_ids[_vehicle_id_counter % len(_reusable_vehicle_ids)]
+                            _vehicle_id_counter += 1
+                            unique_vehicles_in_file.add(vehicle_id)
+                        # Add small time offset (seconds) to each event in the same file
+                        event_timestamp = timestamp + timedelta(seconds=j * random.randint(1, 10))
+                        events.append(generate_event(vehicle_id, event_timestamp))
+                    vehicles_str = f"{len(unique_vehicles_in_file)} unique vehicle(s)" if len(unique_vehicles_in_file) > 1 else "1 vehicle"
+                    print(f"✓ Generated: {filename} ({len(events)} events, {vehicles_str} at {timestamp.strftime('%H:%M')})")
                 else:
+                    # For non-same-vehicle mode, use different vehicle IDs
                     events = [generate_event(generate_vehicle_id(), timestamp) for _ in range(num_events)]
                     print(f"✓ Generated: {filename} ({len(events)} events)")
                 s3_driver.write_file(str(file_path), json.dumps({"vehicles_events": events}, indent=2).encode())
@@ -375,7 +347,75 @@ def main():
                 s3_driver.write_file(str(file_path), json.dumps({"vehicle_status": statuses}, indent=2).encode())
                 print(f"✓ Generated: {filename} ({len(statuses)} statuses)")
         
+        # Generate late-arriving data if requested
+        num_late_files = 0
+        if args.include_late_arrival:
+            yesterday = base_timestamp - timedelta(days=1)
+            today = datetime.now()
+            yesterday_date = yesterday.date()
+            today_date = today.date()
+            print(f"\n📦 Generating late-arriving data:")
+            print(f"   Today's date: {today_date.strftime('%Y-%m-%d')}")
+            print(f"   Yesterday's date: {yesterday_date.strftime('%Y-%m-%d')}")
+            print(f"   Files will have today's timestamp ({today.strftime('%Y-%m-%d %H:%M')})")
+            print(f"   But event_time will be from yesterday ({yesterday_date.strftime('%Y-%m-%d')})")
+            print(f"   This simulates late-arriving data for testing 2-day lookback\n")
+            
+            # Generate 2-3 late-arriving files
+            num_late_files = random.randint(2, 3)
+            for i in range(num_late_files):
+                # File timestamp is today (when file arrives)
+                file_timestamp = today.replace(
+                    hour=random.randint(0, today.hour if today.hour > 0 else 23),
+                    minute=random.randint(0, 59),
+                    second=0,
+                    microsecond=0
+                )
+                
+                # Event times are from yesterday (late-arriving data)
+                if should_generate_events:
+                    filename = generate_filename("vehicles_events", file_timestamp)
+                    file_path = incoming_folder / filename
+                    num_events = random.randint(3, 8)
+                    
+                    events = []
+                    if use_same_vehicle and _reusable_vehicle_ids:
+                        # Reuse vehicle IDs from the pool
+                        vehicle_id = _reusable_vehicle_ids[_vehicle_id_counter % len(_reusable_vehicle_ids)]
+                        _vehicle_id_counter += 1
+                    else:
+                        vehicle_id = generate_vehicle_id()
+                    
+                    # Generate events with event_time from yesterday
+                    for j in range(num_events):
+                        # Event time is from yesterday, spread throughout the day
+                        hours_offset = random.randint(0, 23)
+                        minutes_offset = random.randint(0, 59)
+                        event_time = yesterday.replace(hour=hours_offset, minute=minutes_offset, second=random.randint(0, 59))
+                        events.append(generate_event(vehicle_id, event_time))
+                    
+                    s3_driver.write_file(str(file_path), json.dumps({"vehicles_events": events}, indent=2).encode())
+                    print(f"✓ Generated late-arrival: {filename} ({len(events)} events from yesterday, file timestamp: {file_timestamp.strftime('%Y-%m-%d %H:%M')})")
+                
+                if should_generate_status:
+                    filename = generate_filename("vehicles_status", file_timestamp)
+                    file_path = incoming_folder / filename
+                    num_statuses = random.randint(1, 3)
+                    
+                    statuses = []
+                    for j in range(num_statuses):
+                        # Report time is from yesterday
+                        hours_offset = random.randint(0, 23)
+                        minutes_offset = random.randint(0, 59)
+                        report_time = yesterday.replace(hour=hours_offset, minute=minutes_offset, second=random.randint(0, 59))
+                        statuses.append(generate_status(generate_vehicle_id(), report_time))
+                    
+                    s3_driver.write_file(str(file_path), json.dumps({"vehicle_status": statuses}, indent=2).encode())
+                    print(f"✓ Generated late-arrival: {filename} ({len(statuses)} statuses from yesterday, file timestamp: {file_timestamp.strftime('%Y-%m-%d %H:%M')})")
+        
         total_files = args.num_files * (should_generate_events + should_generate_status)
+        if args.include_late_arrival:
+            total_files += num_late_files * (should_generate_events + should_generate_status)
         print(f"\n✓ Happy flow setup complete! Generated {total_files} file(s) in {incoming_folder}")
 
 

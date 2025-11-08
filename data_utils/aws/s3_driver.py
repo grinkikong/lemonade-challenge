@@ -7,6 +7,10 @@ from typing import List, Optional
 from datetime import datetime
 import boto3
 from botocore.exceptions import ClientError
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 
 class S3Driver:
@@ -109,24 +113,6 @@ class S3Driver:
             except ClientError as e:
                 print(f"Error listing S3 objects: {e}")
                 return []
-
-    def read_file(self, file_path: str) -> bytes:
-        """Read file contents.
-
-        Args:
-            file_path: Path to file (local) or S3 key.
-
-        Returns:
-            File contents as bytes.
-        """
-        if self.is_local:
-            return Path(file_path).read_bytes()
-        else:
-            try:
-                response = self.s3_client.get_object(Bucket=self.bucket_name, Key=file_path)
-                return response["Body"].read()
-            except ClientError as e:
-                raise Exception(f"Error reading S3 object {file_path}: {e}")
 
     def move_file(self, source_path: str, dest_path: str):
         """Move file from source to destination.

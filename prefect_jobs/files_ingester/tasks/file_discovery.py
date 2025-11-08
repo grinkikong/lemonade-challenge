@@ -1,4 +1,4 @@
-"""Move new files to processing folders based on file type detection.
+"""Task 1: Discover and move files to processing folders based on file type detection.
 
 TODO v2: Add metadata table validation:
 - Check metadata status (active/inactive)
@@ -10,7 +10,7 @@ import re
 from pathlib import Path
 from prefect import task, get_run_logger
 from data_utils.aws.s3_driver import s3_driver
-from prefect_jobs.hourly_ingestion_pipeline.config import (
+from prefect_jobs.files_ingester.config import (
     INCOMING_FOLDER,
     PROCESSING_FOLDER,
     FAILED_FOLDER,
@@ -70,8 +70,6 @@ def handle_unknown_files(file_list: list, moved_to_failed: list):
             moved_to_failed.append({"file": file_name, "reason": "Unknown file type"})
         except Exception as e:
             logger.error(f"Failed to move {file_name} to failed folder: {e}")
-
-
 
 
 def move_files_to_processing(

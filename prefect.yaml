@@ -13,12 +13,12 @@ pull:
 
 # Deployments section
 deployments:
-  # Hourly Ingestion Pipeline: Combined job with 2 dependent tasks
-  - name: hourly_ingestion_pipeline
+  # Files Ingestion Pipeline: Combined job with 3 dependent tasks
+  - name: files_ingester
     version: 1
     tags: ['ingestion', 'spark', 'orchestrator', 'hourly']
-    description: Combined pipeline with Task 1 (move files to processing) and Task 2 (automatically process all folders with Spark jobs)
-    entrypoint: prefect_jobs/hourly_ingestion_pipeline/main.py:hourly_ingestion_pipeline_flow
+    description: Combined pipeline with Task 1 (move files to processing), Task 2 (process all folders with Spark jobs), and Task 3 (cleanup)
+    entrypoint: prefect_jobs/files_ingester/main.py:files_ingester_flow
     parameters: {}
     # For local execution - no work pool needed
     # In production: would use work_pool with Kubernetes/ECS
@@ -32,11 +32,11 @@ deployments:
         active: true
 
   # Daily Prefect Job: Summary Table Creation
-  - name: daily_summary_aggregation
+  - name: daily_summary
     version: 1
     tags: ['aggregation', 'summary', 'daily', 'iceberg']
-    description: Creates daily summary table in Iceberg format (managed by Glue Catalog) with vehicle_id, day, last_event_time, last_event_type
-    entrypoint: prefect_jobs/daily_summary_aggregation/main.py:daily_summary_aggregation_flow
+    description: Creates daily summary table using Spark aggregation with vehicle_id, day, last_event_time, last_event_type
+    entrypoint: prefect_jobs/daily_summary/main.py:daily_summary_aggregation_flow
     parameters: {}
     # For local execution - no work pool needed
     # In production: would use work_pool with Kubernetes/ECS

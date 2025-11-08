@@ -2,13 +2,22 @@
 
 import os
 from pathlib import Path
+from dotenv import load_dotenv
+from pyspark.sql.types import StructType, StructField, StringType
+
+# Load environment variables from .env file
+load_dotenv()
+
+# Schema validation for input data (vehicle_events)
+# Expected columns when reading from Parquet datalake
+VEHICLE_EVENTS_INPUT_SCHEMA = StructType([
+    StructField("vehicle_id", StringType(), nullable=False),
+    StructField("event_time", StringType(), nullable=False),  # Will be converted to timestamp
+    StructField("event_type", StringType(), nullable=False),
+    # Other fields may exist but are not required for aggregation
+])
 
 ENV = os.environ.get("ENV", "local")
-
-# Default database path (outside project)
-_DEFAULT_DB_PATH = Path.home() / "data" / "lemonade" / "metadata.db"
-_DEFAULT_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
-_DEFAULT_DB_URL = f"sqlite:///{_DEFAULT_DB_PATH}"
 
 # Datalake configuration
 # Local: Parquet files in local filesystem
@@ -25,7 +34,7 @@ else:
     else:
         DATALAKE_BASE = (_PROJECT_ROOT / _DATALAKE_BASE_STR).resolve()
 DATALAKE_EVENTS_TABLE = DATALAKE_BASE / "raw_data" / "vehicle_events"
-DATALAKE_SUMMARY_TABLE = DATALAKE_BASE / "dwh" / "daily_summary"
+DATALAKE_SUMMARY_TABLE = DATALAKE_BASE / "reports" / "daily_summary"
 
 # Iceberg configuration (production - not used in this challenge)
 # In production: Would use Iceberg tables in S3 with AWS Glue Catalog
@@ -40,6 +49,10 @@ DATALAKE_SUMMARY_TABLE = DATALAKE_BASE / "dwh" / "daily_summary"
 #   - Metadata: PostgreSQL
 #   - Raw events: Iceberg tables in S3
 #   - Aggregation layer: Snowflake (daily summary tables)
+_DEFAULT_DB_PATH = Path.home() / "data" / "lemonade" / "metadata.db"
+_DEFAULT_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+_DEFAULT_DB_URL = f"sqlite:///{_DEFAULT_DB_PATH}"
+
 if ENV == "production":
     DATABASE_URL = os.environ.get("DATABASE_URL")  # PostgreSQL in production
 else:

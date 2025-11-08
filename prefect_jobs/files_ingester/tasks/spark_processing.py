@@ -1,4 +1,4 @@
-"""Spark processing: reads files from processing folders, writes to datalake.
+"""Task 2: Spark processing - reads files from processing folders, writes to datalake.
 
 TODO v2: Add metadata table support:
 - Retrieve schemas from database
@@ -6,19 +6,18 @@ TODO v2: Add metadata table support:
 - Full schema validation from metadata
 """
 
-import traceback
 from pathlib import Path
 from prefect import task, get_run_logger
 from data_utils.aws.s3_driver import s3_driver
-from prefect_jobs.hourly_ingestion_pipeline.config import (
+from prefect_jobs.files_ingester.config import (
     PROCESSING_FOLDER,
     FAILED_FOLDER,
     DATALAKE_BASE,
     FILE_TYPE_CONFIG,
     SUPPORTED_FILE_TYPES,
 )
-from prefect_jobs.hourly_ingestion_pipeline.utils import (
-    process_files_with_pyspark,
+from prefect_jobs.files_ingester.utils.spark_batch_ingestion import (
+    spark_batch_ingestion,
 )
 
 
@@ -74,7 +73,7 @@ def process_files_batch_with_spark(
     file_paths: list,
     file_type: str,
     output_table: Path,
-    metadata_dict: dict,
+    config_dict: dict,
 ) -> dict:
     """Process batch of files from processing folder with Spark and write to datalake.
 
@@ -82,7 +81,7 @@ def process_files_batch_with_spark(
         file_paths: List of file paths to process.
         file_type: Type of file.
         output_table: Output table path (Iceberg table location).
-        table_metadata: TableMetadata instance with schema and config.
+        config_dict: Config dict with required_columns, root_keys, partition_column.
 
     Returns:
         Processing result dictionary with records_count and status.
@@ -90,18 +89,19 @@ def process_files_batch_with_spark(
     logger = get_run_logger()
     logger.info(f"Processing {len(file_paths)} {file_type} files with Spark")
 
-    try:
-        # Use PySpark to process all files (local)
-        # In production (non-challenge): Would submit Spark job to EMR cluster
-        result = process_files_with_pyspark(
-            file_paths, file_type, output_table, metadata_dict
-        )
-        return result
-
-    except Exception as e:
-        logger.error(f"Spark processing failed: {e}")
-        logger.error(f"Full traceback:\n{traceback.format_exc()}")
-        return {"status": "failed", "error": str(e), "records_count": 0}
+    # Get processing folder path (parent of first file)
+    processing_folder = str(Path(file_paths[0]).parent)
+    output_path = str(output_table)
+    
+    result = spark_batch_ingestion(
+        processing_folder_path=processing_folder,
+        output_table_path=output_path,
+        file_type=file_type,
+        config=config_dict,
+        file_paths=file_paths  # Pass actual file paths instead of using glob
+    )
+    
+    return result
 
 
 @task

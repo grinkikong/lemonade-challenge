@@ -7,7 +7,7 @@ to processed/ only for chunks that were successfully loaded to Parquet.
 from pathlib import Path
 from prefect import task, get_run_logger
 from data_utils.aws.s3_driver import s3_driver
-from prefect_jobs.hourly_ingestion_pipeline.config import (
+from prefect_jobs.files_ingester.config import (
     PROCESSING_FOLDER,
     PROCESSED_FOLDER,
     DATALAKE_BASE,

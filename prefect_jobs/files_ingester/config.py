@@ -1,7 +1,11 @@
-"""Configuration for hourly ingestion pipeline job."""
+"""Configuration for files ingestion pipeline job."""
 
 import os
 from pathlib import Path
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 # TODO v2: Add metadata table with full schema validation:
 # - Store schemas in database (PostgreSQL in production)
@@ -12,16 +16,38 @@ from pathlib import Path
 
 # Hardcoded file type definitions (v1 - simplified)
 # Supported file types: vehicle_events and vehicle_status
+from pyspark.sql.types import StructType, StructField, StringType, MapType
+
+# Schema definitions for validation
+# These schemas enforce data types and catch schema changes early
+VEHICLE_EVENTS_SCHEMA = StructType([
+    StructField("vehicle_id", StringType(), nullable=False),
+    StructField("event_time", StringType(), nullable=False),  # ISO format string, validated via to_timestamp()
+    StructField("event_source", StringType(), nullable=False),
+    StructField("event_type", StringType(), nullable=False),
+    StructField("event_value", StringType(), nullable=True),
+    StructField("event_extra_data", MapType(StringType(), StringType()), nullable=True),
+])
+
+VEHICLE_STATUS_SCHEMA = StructType([
+    StructField("vehicle_id", StringType(), nullable=False),
+    StructField("report_time", StringType(), nullable=False),  # ISO format string, validated via to_timestamp()
+    StructField("status_source", StringType(), nullable=False),
+    StructField("status", StringType(), nullable=False),
+])
+
 FILE_TYPE_CONFIG = {
     "vehicle_events": {
         "required_columns": ["vehicle_id", "event_time", "event_source", "event_type"],
         "root_keys": ["vehicles_events", "vehicle_events"],  # Support both plural and singular
         "partition_column": "date",
+        "schema": VEHICLE_EVENTS_SCHEMA,  # Explicit schema for validation
     },
     "vehicle_status": {
         "required_columns": ["vehicle_id", "report_time", "status_source", "status"],
         "root_keys": ["vehicles_status", "vehicle_status"],  # Support both plural and singular
         "partition_column": "date",
+        "schema": VEHICLE_STATUS_SCHEMA,  # Explicit schema for validation
     },
 }
 

@@ -1,4 +1,4 @@
-"""Hourly Ingestion Pipeline: Combined Prefect Job.
+"""Files Ingestion Pipeline: Combined Prefect Job.
 
 This job consists of three dependent tasks:
 1. Task 1: Discovers new files in incoming folder, validates metadata, and moves to processing folders
@@ -7,21 +7,21 @@ This job consists of three dependent tasks:
 """
 
 from prefect import flow, get_run_logger
-from prefect_jobs.hourly_ingestion_pipeline.move_new_files import discover_and_move_files
-from prefect_jobs.hourly_ingestion_pipeline.spark_processing import process_all_folders_with_spark
-from prefect_jobs.hourly_ingestion_pipeline.cleanup_processed import cleanup_processed_files
+from prefect_jobs.files_ingester.tasks.file_discovery import discover_and_move_files
+from prefect_jobs.files_ingester.tasks.spark_processing import process_all_folders_with_spark
+from prefect_jobs.files_ingester.tasks.cleanup import cleanup_processed_files
 
 
-@flow(name="hourly_ingestion_pipeline_flow", log_prints=True)
-def hourly_ingestion_pipeline_flow():
-    """Hourly Ingestion Pipeline: Combined flow with three dependent tasks.
+@flow(name="files_ingester_flow", log_prints=True)
+def files_ingester_flow():
+    """Files Ingestion Pipeline: Combined flow with three dependent tasks.
 
     Task 1: Discovers new files in incoming folder, validates metadata, and moves to processing folders
     Task 2: Discovers processing folders and processes all files with Spark jobs (writes to Parquet)
     Task 3: Cleanup - Moves successfully processed files from processing/ to processed/ folder
     """
     logger = get_run_logger()
-    logger.info("Starting hourly ingestion pipeline flow")
+    logger.info("Starting files ingestion pipeline flow")
 
     try:
         # Task 1: Discover and move files
@@ -81,9 +81,10 @@ def hourly_ingestion_pipeline_flow():
         }
 
     except Exception as e:
-        logger.error(f"Error in hourly ingestion pipeline flow: {e}")
+        logger.error(f"Error in files ingestion pipeline flow: {e}")
         raise
 
 
 if __name__ == "__main__":
-    hourly_ingestion_pipeline_flow()
+    files_ingester_flow()
+

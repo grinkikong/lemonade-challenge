@@ -1,111 +1,79 @@
-# Lemonade Data Ingestion Pipeline
+# Lemonade Data Engineering Challenge
 
-A scalable data ingestion pipeline using Prefect as scheduler, Spark for heavy lifting of mass events for each chunk of files, and Iceberg tables as datalake. Currently supports `vehicles_events_[time].json` and `vehicles_status_[time].json` file types, and can be extended to support any new file types through the `table_metadata` table in SQLite (this project). No code changes required to add new file types - just register metadata in the database.
+Data ingestion pipeline for vehicle events and status data, following a "Prefect style" architecture. The pipeline handles unbounded data streams, processes files from S3 (or local folders for development), and generates daily summaries.
 
-**Note:** This project uses SQLite only for local development. In production:
-- **Metadata**: PostgreSQL
-- **Raw events**: Iceberg tables in S3
-- **Aggregation layer**: Snowflake
+## Architecture
 
-## Architecture Overview
-
-The pipeline consists of two Prefect jobs that work together to ingest, process, and aggregate vehicle data:
-
-### 1. Hourly Ingestion Pipeline (Combined Job with 3 Dependent Tasks)
-- **Schedule**: Every hour at :00
-- **Task 1 - New File Type Discovery**:
-  - Scans `data/source_data/incoming/` folder for new JSON files
-  - Detects file types from filenames (pattern: `{file_type}_{timestamp}.json`)
-  - Creates inactive metadata records in `table_metadata` for any new file types not yet registered
-  - Admin can then configure `schema_definition` and `processing_config` and set status to "active"
-  - Moves valid files to `data/source_data/processing/{file_type}/`
-  - Moves invalid files (missing/inactive metadata) to `data/source_data/failed/`
-- **Task 2 - Spark Processing** (depends on Task 1):
-  - Automatically discovers all folders in `data/source_data/processing/` directory
-  - Loops through each folder and processes all files
-  - Retrieves table metadata (schema and processing config) from database
-  - Processes files with PySpark (local) or submits to EMR (production)
-  - Validates data against schema from metadata
-  - Writes processed data to datalake as Parquet files (partitioned by date)
-  - Moves failed files (including schema validation failures) to `data/source_data/failed/`
-  - Files remain in `processing/` after successful processing (Task 3 handles cleanup)
-- **Task 3 - Cleanup Processed Files** (depends on Task 2):
-  - Discovers all folders in `data/source_data/processing/`
-  - Verifies that corresponding Parquet files exist in the datalake
-  - Only if Parquet files exist, moves all files from `processing/{file_type}/` to `processed/{file_type}/`
-
-### 2. Daily Summary Aggregation (Job)
-- **Schedule**: Daily at 1:00 AM UTC
-- **Function**: Creates daily summary table in Iceberg format
-- **Actions**:
-  - Aggregates data from vehicle_events table
-  - Creates summary table with: vehicle_id, day, last_event_time, last_event_type
-  - Managed by AWS Glue Catalog
-
-## Data Flow
+### Data Flow
 
 ```
-Incoming Files (JSON) in data/source_data/incoming/
+Incoming Files
     ↓
-Hourly Pipeline - Task 1: File Discovery & Movement
+[Task 1: File Discovery from incoming folder] → Move to processing/ or failed/
     ↓
-Validate metadata → Move to data/source_data/processing/{file_type}/ or data/source_data/failed/
+[Task 2: Spark Processing] → Read from processing/, validate, write to Parquet datalake
     ↓
-Hourly Pipeline - Task 2: Auto-discover folders & Spark Processing
+[Task 3: Cleanup] → Move successfully processed files to processed/
     ↓
-Datalake (Parquet files in data/datalake/raw_data/)
+Parquet Datalake (partitioned by date)
     ↓
-Hourly Pipeline - Task 3: Cleanup Processed Files
-    ↓
-Move to data/source_data/processed/{file_type}/
-    ↓
-Daily Job: Summary Aggregation
-    ↓
-Summary Table (Parquet in data/datalake/dwh/daily_summary/)
+[Daily Summary Job] → Aggregate and create daily summary tables
 ```
+
+### Technology Stack
+
+- **Orchestration**: Prefect 2.x
+- **Processing**: Apache Spark (PySpark) - local mode for development
+- **Storage**: 
+  - Local: Parquet files in filesystem
+  - Production: Iceberg tables in S3 (planned)
+- **Metadata**: SQLite (local) / PostgreSQL (production)
+- **Query Engine**: DuckDB for local exploration
+- **Language**: Python 3.11
 
 ## Project Structure
 
 ```
 lemonade-challenge/
 ├── prefect_jobs/                    # Prefect job definitions
-│   ├── hourly_ingestion_pipeline/  # Combined job with 3 tasks
-│   │   ├── main.py                 # Flow definition
-│   │   ├── move_new_files.py       # Task 1: File discovery
-│   │   ├── spark_processing.py     # Task 2: Spark processing
-│   │   ├── cleanup_processed.py    # Task 3: Cleanup
-│   │   ├── config.py
-│   │   └── utils.py
-│   └── daily_summary_aggregation/   # Daily summary job
-│       ├── main.py
-│       ├── config.py
-│       └── utils.py
-├── data_utils/                      # Shared utilities
-│   ├── database/                    # Database drivers and models
-│   │   ├── drivers.py
-│   │   ├── models.py
-│   │   └── schema.py
-│   └── aws/                         # AWS/S3 drivers
-│       └── s3_driver.py
-├── data/                            # Data folders
-│   ├── source_data/                 # Source data and processing stages
-│   │   ├── incoming/                # All incoming files land here
-│   │   ├── processing/              # Files being processed
-│   │   │   ├── vehicle_events/
-│   │   │   └── vehicle_status/
-│   │   ├── failed/                  # Failed files (including schema validation errors)
-│   │   └── processed/               # Successfully processed files
-│   └── datalake/                    # Processed data (Parquet format)
-│       └── raw_data/
-│           ├── vehicle_events/      # Partitioned by date
-│           └── vehicle_status/      # Partitioned by date
-│       └── dwh/                     # Data warehouse (aggregated/transformed data)
-│           └── daily_summary/       # Daily aggregated summaries
+│   ├── files_ingester/              # Files ingestion pipeline
+│   │   ├── main.py                  # Main flow definition
+│   │   ├── config.py                # Job configuration
+│   │   ├── tasks/                   # Prefect tasks
+│   │   │   ├── file_discovery.py    # Task 1: Discover and move files
+│   │   │   ├── spark_processing.py  # Task 2: Process with Spark
+│   │   │   └── cleanup.py           # Task 3: Cleanup processed files
+│   │   └── utils/                    # Utility functions
+│   │       └── spark_batch_ingestion.py
+│   └── daily_summary/                # Daily summary aggregation
+│       ├── main.py                  # Main flow definition
+│       ├── config.py                # Job configuration
+│       └── utils/                   # Utility functions
+│           └── spark_aggregator.py
+├── data_utils/                       # Shared utilities
+│   ├── aws/                         # AWS/S3 drivers
+│   │   └── s3_driver.py            # Unified S3/local file operations
+│   └── database/                    # Database drivers
+│       ├── drivers.py              # SQLite/PostgreSQL driver
+│       └── models.py                # SQLAlchemy models
 ├── scripts/                         # Utility scripts
-│   ├── create_tables.py
-│   ├── generate_test_data.py
-│   ├── setup_duckdb_catalog.py     # Create DuckDB catalog with schemas
-│   └── verify_summary.py           # Verify daily summary structure
+│   ├── create_tables.py             # Create table schemas and DuckDB views
+│   ├── generate_data.py             # Generate test data files
+│   └── backfill_daily_summary.py    # Backfill historical daily summaries (TODO)
+├── data/                            # Local data storage
+│   ├── source_data/                 # Source data folders
+│   │   ├── incoming/               # New files arrive here
+│   │   ├── processing/            # Files being processed
+│   │   ├── failed/                 # Failed files (with error details)
+│   │   └── processed/              # Successfully processed files
+│   └── datalake/                    # Parquet datalake
+│       ├── raw_data/                # Raw ingested data
+│       │   ├── vehicle_events/     # Partitioned by date
+│       │   └── vehicle_status/      # Partitioned by date
+│       └── reports/                 # Reports (aggregated/transformed data)
+│           └── daily_summary/       # Daily aggregated summaries
+├── .env                             # Environment variables (local, gitignored)
+├── .env.example                     # Environment variables template
 ├── prefect.yaml                     # Prefect deployments
 ├── pyproject.toml                   # Poetry dependencies
 └── README.md
@@ -132,6 +100,8 @@ lemonade-challenge/
    echo 'export PATH="/opt/homebrew/opt/openjdk@21/bin:$PATH"' >> ~/.zshrc
    source ~/.zshrc # Apply changes to current session
    ```
+   
+   **Note**: Ensure `JAVA_HOME` is set in your environment. Java must be installed and accessible.
 
 ### Step-by-Step Installation
 
@@ -148,7 +118,17 @@ poetry install
 poetry shell
 ```
 
-#### Step 2: Set Up Prefect Server and Worker
+#### Step 2: Configure Environment Variables
+
+```bash
+# Copy the example .env file (if not already exists)
+cp .env.example .env
+
+# Edit .env to customize settings (optional - defaults work for local dev)
+# The .env file is automatically loaded by the application
+```
+
+#### Step 3: Set Up Prefect Server and Worker
 
 In separate terminal windows/tabs, run:
 
@@ -173,11 +153,11 @@ poetry run prefect worker start --pool default-agent-pool
 poetry run prefect deploy --all
 ```
 
-#### Step 3: Initialize Test Data
+#### Step 4: Initialize Test Data
 
 ```bash
 # Generate test data and set up metadata (cleans all existing data except DB first)
-poetry run python scripts/generate_test_data.py --num-files 5 --cleanup --clean-datalake
+poetry run python scripts/generate_data.py --num-files 5 --cleanup --clean-datalake
 ```
 
 This will:
@@ -188,15 +168,15 @@ This will:
 - Set up active metadata for `vehicle_events` and `vehicle_status`
 - Generate 5 test files of each type (10 files total) in `./data/source_data/incoming/`
 
-#### Step 4: Verify Setup
+#### Step 5: Verify Setup
 
 1. **Check Prefect UI**: Open http://127.0.0.1:4200
-   - You should see both deployments: `hourly_ingestion_pipeline` and `daily_summary_aggregation`
+   - You should see both deployments: `files_ingester` and `daily_summary`
    - Schedules should be active
 
 2. **Manually trigger a test run** (optional):
    ```bash
-   poetry run prefect deployment run 'hourly_ingestion_pipeline_flow/hourly_ingestion_pipeline'
+   poetry run prefect deployment run 'files_ingester_flow/files_ingester'
    ```
 
 3. **Check generated files**:
@@ -208,8 +188,8 @@ This will:
 
 4. **Query the datalake** (verify Parquet files were created):
    ```bash
-   # Option 1: Create DuckDB catalog (recommended)
-   poetry run python scripts/setup_duckdb_catalog.py
+   # After first data ingestion, create DuckDB catalog:
+   poetry run python scripts/create_tables.py
    
    # Query the datalake using DuckDB UI (opens in browser)
    duckdb data/datalake/lemonade.duckdb -ui
@@ -225,27 +205,40 @@ Once you've completed the setup steps above, the pipeline is ready to run:
 
 **Scheduled jobs** will run automatically:
 - Hourly ingestion pipeline: Every hour at :00
-- Daily summary aggregation: Daily at 1:00 AM UTC
+- Daily summary aggregation: Daily at 1:00 AM UTC (with 2-day lookback and event-time filtering)
 
 **Manual execution**:
 ```bash
-# Run hourly pipeline manually
-poetry run python prefect_jobs/hourly_ingestion_pipeline/main.py
+# Run files ingestion pipeline manually
+poetry run python prefect_jobs/files_ingester/main.py
 
 # Or trigger via deployment
-poetry run prefect deployment run 'hourly_ingestion_pipeline_flow/hourly_ingestion_pipeline'
+poetry run prefect deployment run 'files_ingester_flow/files_ingester'
+
+# Run daily summary for a specific date
+poetry run python prefect_jobs/daily_summary/main.py 2025-11-08
+
+# Or trigger via deployment
+poetry run prefect deployment run 'daily_summary_aggregation_flow/daily_summary'
+```
+
+**Backfill historical data**:
+For historical data outside the 2-day lookback window, use the backfill script:
+```bash
+# Backfill daily summaries for a date range
+poetry run python scripts/backfill_daily_summary.py --start-date 2025-01-01 --end-date 2025-11-07
 ```
 
 **Generate more test data**:
 ```bash
 # Generate 10 files of each type
-poetry run python scripts/generate_test_data.py --num-files 10
+poetry run python scripts/generate_data.py --num-files 10
 
 # Generate continuously every 10 seconds
-poetry run python scripts/generate_test_data.py --interval 10 --continuous
+poetry run python scripts/generate_data.py --interval 10 --continuous
 
 # Skip cleanup (add to existing data)
-poetry run python scripts/generate_test_data.py --num-files 5 --no-cleanup
+poetry run python scripts/generate_data.py --num-files 5 --no-cleanup
 ```
 
 ## Configuration
@@ -254,13 +247,14 @@ Configuration is managed through environment variables (see `.env.example`):
 
 - `ENV`: Environment (`local` or `production`)
 - `DATABASE_URL`: Database connection string
-- `INCOMING_FOLDER`: Path to incoming folder (default: `./data/incoming`)
 - `SOURCE_DATA_BASE`: Base path for source data (default: `./data/source_data`)
-- `PROCESSED_FOLDER`: Path to processed folder (default: `./data/processed`)
-- `DATALAKE_BASE`: Base path for datalake
-- `ICEBERG_CATALOG_URI`: Iceberg catalog URI (production)
-- `ICEBERG_WAREHOUSE`: Iceberg warehouse path (production)
+- `DATALAKE_BASE`: Base path for datalake (default: `./data/datalake`)
+- `SPARK_MASTER`: Spark master URL (default: `local[*]`)
+- `SPARK_APP_NAME`: Spark application name
+- `AWS_REGION`: AWS region (production)
 - `S3_BUCKET`: S3 bucket name (production)
+
+**Note**: Ensure `JAVA_HOME` is set in your environment. Java is required for Spark to run.
 
 ## File Formats
 
@@ -268,301 +262,249 @@ Configuration is managed through environment variables (see `.env.example`):
 
 The system supports **dynamic file types** managed through the `table_metadata` table in SQLite (this project). File type definitions (schema structure and processing configuration) are stored in the database, allowing new file types to be added without code changes.
 
-**Note:** In production, metadata would be stored in PostgreSQL.
+**Currently supported file types (v1 - hardcoded):**
+- `vehicle_events`: Vehicle event data
+- `vehicle_status`: Vehicle status data
 
-#### Current File Types
+**TODO v2**: Reintroduce dynamic metadata table support for full schema validation and dynamic file type management.
 
-The system currently has 2 file types configured in the `table_metadata` table:
+### Vehicle Events Format
 
-**vehicles_events Files**
-- **Pattern**: `vehicles_events_YYYYMMDDHHMMSS.json`
-- **Content**: JSON array with event records
-- **Fields**: vehicle_id, event_time, event_source, event_type, event_value, event_extra_data
-- **Managed in**: `table_metadata` table (table_name: "vehicle_events", file_type: "vehicle_events")
+```json
+{
+  "vehicles_events": [
+    {
+      "vehicle_id": "V123",
+      "event_time": "2025-11-08T10:30:00Z",
+      "event_source": "sensor",
+      "event_type": "acceleration"
+    }
+  ]
+}
+```
 
-**vehicles_status Files**
-- **Pattern**: `vehicles_status_YYYYMMDDHHMMSS.json`
-- **Content**: JSON array with status records
-- **Fields**: vehicle_id, report_time, status_source, status
-- **Managed in**: `table_metadata` table (table_name: "vehicle_status", file_type: "vehicle_status")
+### Vehicle Status Format
 
-### Adding New File Types Dynamically
+```json
+{
+  "vehicles_status": [
+    {
+      "vehicle_id": "V123",
+      "report_time": "2025-11-08T10:30:00Z",
+      "status_source": "api",
+      "status": "active"
+    }
+  ]
+}
+```
 
-The system is designed to support any new file type with different payloads. To add a new file type:
+## Prefect Jobs
 
-1. **Register table metadata in database**:
-   ```python
-   from data_utils.database.drivers import db_driver
+### Files Ingestion Pipeline (`files_ingester`)
+
+**Schedule**: Every hour at :00
+
+**Tasks**:
+1. **File Discovery** (`discover_and_move_files`): Scans `incoming/` folder, detects file types, moves to `processing/` or `failed/`
+2. **Spark Processing** (`process_all_folders_with_spark`): Processes all files in `processing/` folders, validates schemas, writes to Parquet datalake
+3. **Cleanup** (`cleanup_processed_files`): Moves successfully processed files from `processing/` to `processed/`
+
+**After first ingestion**: Run `poetry run python scripts/create_tables.py` to create DuckDB views. Views will automatically discover new Parquet files as they are created.
+
+**Entry Point**: `prefect_jobs/files_ingester/main.py:files_ingester_flow`
+
+### Daily Summary Aggregation (`daily_summary`)
+
+**Schedule**: Daily at 1:00 AM UTC (runs after 00:00 UTC to process the day that just ended)
+
+**Overview**: 
+The daily summary job processes events with a **2-day lookback window** and **event-time filtering** to handle late-arriving data. It reads from the last 2 days of partitions but filters events by their actual `event_time` field (not partition date), ensuring late data is captured correctly.
+
+**How it works**:
+1. **Reads 2 days back**: Reads partitions for `date={day_before_yesterday}` and `date={yesterday}`
+2. **Event-time filtering**: Filters events where `event_time` is between 2 days ago 00:00 UTC and yesterday 23:59:59 UTC
+3. **Partition by event date**: Summary table is partitioned by `day` (derived from `event_time`), not processing date
+4. **Merge/upsert logic**: If late data arrives, existing summaries for previous days are updated (not overwritten)
+
+**Tasks**:
+1. **Create Daily Summary** (`create_daily_summary`): 
+   - Reads from last 2 days of partitions
+   - Filters by `event_time` field
+   - Aggregates to get last event per vehicle per day
+   - Creates/updates summaries partitioned by event date
+   - Summary columns:
+     - `vehicle_id`
+     - `day` (from `event_time`, not partition date)
+     - `last_event_time`
+     - `last_event_type`
+
+**Key Assumptions**:
+1. **Late data updates**: Reports for previous days may be updated when late data arrives (within 48-hour window)
+2. **Max 48-hour delay**: Assumes maximum 48 hours delay for late data (2-day lookback is sufficient)
+3. **Historical backfill**: Historical data outside the 2-day window requires a separate backfill process (see Backfill section below)
+
+**Example Scenario**:
+- Event from 2025-11-08 23:30 arrives at 2025-11-09 02:00 (in partition `date=2025-11-09`)
+- Job runs at 2025-11-09 01:00 UTC
+- Reads partitions: `date=2025-11-07` and `date=2025-11-08`
+- Filters: `event_time` between 2025-11-07 00:00 and 2025-11-08 23:59:59
+- **Result**: Event is included in summary for `day=2025-11-08` (based on `event_time`)
+
+**Entry Point**: `prefect_jobs/daily_summary/main.py:daily_summary_aggregation_flow`
+
+**Backfill Process**:
+For historical data that doesn't fall within the 2-day lookback window, a separate backfill process is required. The backfill script (`scripts/backfill_daily_summary.py`) processes a date range and creates/updates summaries for each day, reading from all relevant partitions and filtering by `event_time`.
+
+**Usage**:
+```bash
+# Backfill summaries for a date range
+poetry run python scripts/backfill_daily_summary.py --start-date 2025-01-01 --end-date 2025-11-07
+```
+
+**Note**: The backfill process uses the same aggregation logic as the daily job but processes multiple days in sequence, making it suitable for initial data loads or reprocessing historical periods.
+
+## Data Lake Structure
+
+**Note**: This implementation uses local Parquet files with DuckDB views for **development/demonstration purposes only**. In production, data is stored as **Parquet files in S3** (same format), with **table schemas predefined in AWS Glue Catalog as Iceberg tables** for better scalability, ACID transactions, and schema evolution.
+
+### Raw Data (`raw_data`)
+
+- **Location**: `data/datalake/raw_data/` (local) or `s3://lemonade-datalake/raw_data/` (production)
+- **Format**: Parquet files (same format in dev and production), partitioned by date
+- **Table Definition**: Local DuckDB views (dev) or Iceberg tables in AWS Glue Catalog (production)
+- **Tables**:
+  - `vehicle_events/`: Partitioned by `date` column
+  - `vehicle_status/`: Partitioned by `date` column
+
+### Reports (`reports`)
+
+- **Location**: `data/datalake/reports/` (local) or `s3://lemonade-datalake/reports/` (production)
+- **Format**: Parquet files (same format in dev and production), partitioned by day
+- **Table Definition**: Local DuckDB views (dev) or Iceberg tables in AWS Glue Catalog (production)
+- **Tables**:
+  - `daily_summary/`: Daily aggregated summaries, partitioned by `day` (derived from `event_time`, not processing date)
+
+## Querying the Data Lake
+
+**Note**: The DuckDB approach below is for **development/demonstration only**. In production, Parquet files in S3 are managed as Iceberg tables in AWS Glue Catalog (with predefined schemas) and queried directly via Spark, Athena, or other query engines.
+
+### Using DuckDB (Development/Demo Only)
+
+1. **Set up the catalog** (run after first data ingestion):
+   ```bash
+   poetry run python scripts/create_tables.py
+   ```
    
-   # Define schema for your new file type
-   new_schema = {
-       "fields": [
-           {"name": "id", "type": "string", "nullable": False},
-           {"name": "timestamp", "type": "timestamp", "nullable": False},
-           {"name": "data", "type": "string", "nullable": True},
-           # ... add your fields
-       ],
-       "primary_key": ["id", "timestamp"],
-   }
-   
-   # Define processing config
-   processing_config = {
-       "partition_by": "date",
-       "format": "iceberg",
-       "write_mode": "append",
-   }
-   
-   # Register metadata
-   db_driver.get_or_create_table_metadata(
-       table_name="new_table_name",
-       file_type="new_file_type",
-       schema_definition=new_schema,
-       partition_column="date",
-       processing_config=processing_config,
-       description="Description of new file type",
-   )
+   **Note**: Run this script after your first data ingestion to create DuckDB views. The views will automatically discover new Parquet files as they are created.
+
+2. **Query using DuckDB UI**:
+   ```bash
+   duckdb data/datalake/lemonade.duckdb -ui
    ```
 
-2. **File naming**:
-   - File name should contain the `file_type` string (e.g., `new_file_type_20240115120000.json`)
-   - System automatically detects file type by matching filename with registered types
-   - Processing folder `data/source_data/processing/new_file_type/` will be created automatically
+3. **Query using DuckDB CLI**:
+   ```bash
+   duckdb data/datalake/lemonade.duckdb
+   ```
+   Then run SQL queries:
+   ```sql
+   SELECT * FROM raw_data.vehicle_events LIMIT 10;
+   SELECT * FROM raw_data.vehicle_status LIMIT 10;
+   SELECT * FROM reports.daily_summary WHERE day = '2025-11-08';
+   ```
 
-3. **That's it!** The system will automatically:
-   - Discover files with the new file type (by matching filename with registered types)
-   - Move them to the appropriate processing folder (created automatically)
-   - Retrieve schema and processing config from `table_metadata` table
-   - Process them with Spark using the defined schema and config
-
-**No code changes required** - just register new file type metadata in the database and the system will handle it automatically.
-
-## Querying the Datalake
-
-After running the pipeline, you can query the Parquet files in the datalake using DuckDB:
-
-### Option 1: DuckDB Web UI (Recommended - Visual Interface)
-
-First, create the DuckDB catalog with explicit schemas (only needed once, or when table structure changes):
-
-```bash
-poetry run python scripts/setup_duckdb_catalog.py
-```
-
-**Note:** The catalog uses glob patterns to automatically discover new Parquet files, so you don't need to regenerate it when new data arrives!
-
-Then launch the DuckDB Web UI (install DuckDB CLI with `brew install duckdb`):
-
-```bash
-duckdb data/datalake/lemonade.duckdb -ui
-```
-
-This launches a web interface in your browser (usually at `http://localhost:8080` or similar). You can:
-- Browse tables visually
-- Write and execute SQL queries
-- See query results in a table format
-- View table schemas
-
-### Option 2: DuckDB Command Line Interface
-
-```bash
-duckdb data/datalake/lemonade.duckdb
-```
-
-**Example queries:**
-```sql
-D SHOW SCHEMAS;
-D SHOW TABLES FROM raw_data;
-D SHOW TABLES FROM dwh;
-D SELECT * FROM raw_data.vehicle_events LIMIT 10;
-D SELECT COUNT(*) FROM raw_data.vehicle_events;
-D SELECT * FROM dwh.daily_summary LIMIT 10;
-D DESCRIBE raw_data.vehicle_events;
-```
-
-**Schema organization:**
-- **`raw_data` schema**: Raw event data
-  - `raw_data.vehicle_events` - Vehicle events (7 columns: vehicle_id, event_time, event_source, event_type, event_value, event_extra_data, date)
-  - `raw_data.vehicle_status` - Vehicle status reports (5 columns: vehicle_id, report_time, status_source, status, date)
-- **`dwh` schema**: Data warehouse (aggregated/transformed data)
-  - `dwh.daily_summary` - Daily aggregated summaries (4 columns: vehicle_id, day, last_event_time, last_event_type)
-
-**Example queries:**
-```sql
--- Query raw data
-SELECT * FROM raw_data.vehicle_events LIMIT 10;
-SELECT * FROM raw_data.vehicle_status WHERE status = 'driving';
-
--- Query DWH
-SELECT * FROM dwh.daily_summary ORDER BY day DESC LIMIT 10;
-
--- Show schemas
-SHOW SCHEMAS;
-SHOW TABLES FROM raw_data;
-SHOW TABLES FROM dwh;
-```
-
-**Note:** The DuckDB catalog (`lemonade.duckdb`) acts as a metadata layer - Parquet files remain unchanged. All query engines (DuckDB, Spark, etc.) can query the same Parquet files.
-
-### Option 3: Other Query Methods (Optional)
-
-- **Spark SQL**: `poetry run python scripts/query_datalake_spark.py --table vehicle_events`
-- **DuckDB Python**: `poetry run python scripts/query_datalake.py --table vehicle_events`
-
-## Database Access
-
-The project uses a global `db_driver` instance for database access:
-
-```python
-from data_utils.database.drivers import db_driver
-from data_utils.database.models import TableMetadata
-
-# Use with context manager
-with db_driver.session() as session:
-    metadata = session.query(TableMetadata).filter(...).first()
-```
-
-**Database location**: `~/data/lemonade/metadata.db` (SQLite)
-
-## Database Schema
-
-### Metadata Table (SQLite - this project only)
-
-**table_metadata**: Stores table schema definitions and Spark processing configuration
-- table_name: Name of the table (e.g., "vehicle_events", "vehicle_status")
-- file_type: Type of file (vehicle_events or vehicle_status)
-- partition_column: Column name for partitioning (default: "date")
-- schema_definition: JSON schema defining the structure/fields for Spark processing
-- processing_config: JSON configuration for Spark processing (partition_by, format, write_mode, etc.)
-- description: Optional description of the table
-
-Each row represents metadata for a table name, defining how Spark should process the payload/events.
-
-**Dynamic Support**: New file types can be added by inserting a new row in this table with:
-- Unique `table_name` and `file_type`
-- `schema_definition` describing the payload structure
-- `processing_config` for Spark processing options
-
-The system will automatically discover and process files for any registered file type without code changes.
-
-### Datalake Tables (Iceberg)
-
-**vehicle_events**: Partitioned by date (date=YYYY-MM-DD/)
-- vehicle_id, event_time, event_source, event_type, event_value, event_extra_data
-
-**vehicle_status**: Partitioned by date (date=YYYY-MM-DD/)
-- vehicle_id, report_time, status_source, status
-
-**daily_summary**: Daily aggregation table
-- vehicle_id, day, last_event_time, last_event_type
-
-## Production Considerations
-
-### Spark Integration
-- In production, Spark jobs would be submitted to EMR or Spark cluster
-- Current implementation simulates Spark processing for local development
-- See `prefect_jobs/hourly_ingestion_pipeline/utils.py` for Spark job submission example
-
-### Iceberg Tables
-- Production uses PyIceberg with AWS Glue Catalog
-- Tables are partitioned by date for efficient queries
-- Supports ACID transactions, schema evolution, and time travel
-
-### S3 Integration
-- Local development uses filesystem
-- Production uses boto3 for S3 operations
-- Files are organized in S3 with prefixes matching folder structure
+**Note**: The `daily_summary` table is partitioned by `day` (derived from `event_time`), not by processing date. This ensures that late-arriving data is correctly associated with the day the event actually occurred, not when it was processed.
 
 ## Troubleshooting
 
-### Database Connection Issues
-- Ensure SQLite database file path is writable
-- Check SQLite database file exists (this project only)
-- In production: Would check PostgreSQL connection for metadata
-- Verify database exists and user has permissions
+### Java/Spark Issues
 
-### File Processing Failures
-- Check file format matches expected JSON structure
-- Verify file naming pattern
-- Check database metadata table for error messages
-- Inspect failed/ folder for problematic files
+**Error**: `Java gateway process exited before sending its port number`
 
-### Prefect Issues
-- Ensure Prefect server is running (if using agent)
-- Check Prefect logs for errors
-- Verify flow deployment with `prefect deployment ls`
+**Solution**:
+1. Verify Java is installed: `java -version`
+2. Ensure `JAVA_HOME` is set. If it's not set:
+   - Ensure Java is installed: `brew install openjdk@21`
+   - If Java is in a non-standard location, set `JAVA_HOME` manually:
+     ```bash
+     export JAVA_HOME="/path/to/your/java"
+     export PATH="$JAVA_HOME/bin:$PATH"
+     ```
+3. For PyCharm/IDE: The automatic detection should work, but you can also set `JAVA_HOME` in Run Configuration → Environment Variables if needed
 
-## Assumptions
+### Prefect UI Not Accessible
 
-1. **File Naming**: Files follow pattern `{type}_{timestamp}.json` where timestamp is `YYYYMMDDHHMMSS`
-   - For new file types, file name should contain the `file_type` string for automatic detection
-2. **JSON Structure**: Files contain root keys matching the file type (e.g., `vehicles_events`, `vehicle_status`)
-   - For new file types, define the structure in `schema_definition` when registering metadata
-3. **Dynamic File Types**: New file types are supported by registering metadata in `table_metadata` table
-   - System automatically discovers and processes any registered file type
-4. **Partitioning**: Data is partitioned by date extracted from filename timestamp (configurable per table)
-5. **Processing Order**: Files can arrive out of chronological order (retroactive processing supported)
-6. **Local Development**: Uses SQLite and local filesystem
-7. **Production**: Would use PostgreSQL for metadata, Iceberg tables in S3 for raw events, and Snowflake for aggregation layer (this project uses SQLite only)
+**Error**: Cannot connect to Prefect UI at http://127.0.0.1:4200
 
-## Alerts and Monitoring
+**Solution**:
+1. Ensure Prefect server is running: `poetry run prefect server start`
+2. Check if port 4200 is already in use
+3. Access the UI in a browser at http://127.0.0.1:4200
 
-### Failed File Alerts
+### Files Not Processing
 
-The system logs alerts when files fail processing and are moved to the `failed/` folder:
+**Check**:
+1. Files are in `data/source_data/incoming/` folder
+2. File names match expected patterns (`vehicles_events_*.json` or `vehicles_status_*.json`)
+3. Files are valid JSON
+4. Check `data/source_data/failed/` for error details
 
-- **Individual File Failures**: Each failed file logs an ERROR alert with file details, error message, and destination path
-- **Batch Failures**: Summary alerts are logged when a folder or pipeline run completes with failures
-- **Alert Details Include**:
-  - File name and type
-  - Error message or exception
-  - Destination path in failed folder
-  - Processing statistics (processed vs failed counts)
+### DuckDB Schema Errors
 
-### Future Improvements for Error Handling
+**Error**: `types don't match` or `Binder Error`
 
-**TODO: Per-File Error Handling Instead of Failing Entire Chunks**
+**Solution**:
+1. Regenerate the DuckDB catalog: `poetry run python scripts/create_tables.py`
+2. Ensure Parquet files exist and are valid
+3. Check for old Parquet files with different schemas (delete if found)
 
-Currently, if a file fails, it's moved to the failed folder and processing continues. Future improvements should include:
+## Development
 
-1. **Granular Error Classification**:
-   - Categorize errors by type (schema mismatch, data quality, parsing errors, etc.)
-   - Different handling strategies per error type
-   - Retry logic for transient errors
+### Running Tests
 
-2. **Partial Success Handling**:
-   - Process valid records from a file even if some records fail
-   - Move only failed records to a separate error table/partition
-   - Continue processing remaining files in chunk even if one fails
+```bash
+poetry run pytest
+```
 
-3. **Error Recovery**:
-   - Automatic retry for transient errors (network, temporary Spark issues)
-   - Dead letter queue for permanently failed files
-   - Manual reprocessing capability for failed files
+### Code Formatting
 
-4. **Enhanced Alerting**:
-   - Integration with monitoring systems (PagerDuty, Slack, email)
-   - Alert severity levels based on failure rate
-   - Dashboard for tracking failure patterns
-   - Automated escalation for critical failures
+```bash
+poetry run black .
+poetry run ruff check .
+```
 
-5. **Error Analysis**:
-   - Track error patterns by file type, time, or source
-   - Identify systemic issues vs one-off failures
-   - Generate reports for data quality monitoring
+### Adding New File Types
 
-## What Would Be Done Differently with More Time
+**v1 (Current)**: File types are hardcoded in `prefect_jobs/files_ingester/config.py` in the `FILE_TYPE_CONFIG` dictionary.
 
-1. **Full Spark Integration**: Complete Spark job submission to EMR/cluster
-2. **Iceberg Implementation**: Full PyIceberg integration with Glue Catalog
-3. **Per-File Error Handling**: Implement granular error handling as described above
-4. **Testing**: Comprehensive unit and integration tests
-5. **Monitoring**: Metrics, dashboards, and alerting
-6. **Error Recovery**: Automatic retry logic and dead letter queues
-7. **Data Validation**: Schema validation and data quality checks
-8. **Performance Optimization**: Connection pooling, query optimization
-9. **CI/CD**: Automated testing and deployment pipelines
-10. **Documentation**: API documentation and architecture diagrams
-11. **Scalability**: Distributed processing with Dask/Kubernetes
+**v2 (Planned)**: Dynamic file type support via metadata table:
+1. Add new file type to `table_metadata` table
+2. Configure schema definition and processing config
+3. System automatically detects and processes new file type
+
+## Production Deployment
+
+### Architecture
+
+- **Metadata**: PostgreSQL
+- **Raw Events**: Iceberg tables in S3
+- **Aggregation Layer**: Snowflake
+- **Orchestration**: Prefect Cloud or self-hosted Prefect server
+- **Compute**: EMR clusters for Spark processing (or Kubernetes with Spark operator)
+
+### Environment Variables
+
+Set the following in your production environment:
+
+```bash
+ENV=production
+DATABASE_URL=postgresql://user:pass@host:5432/dbname
+DATALAKE_BASE=s3://lemonade-datalake
+S3_BUCKET=lemonade-datalake
+AWS_REGION=us-east-1
+ICEBERG_CATALOG_URI=...
+ICEBERG_WAREHOUSE=s3://lemonade-datalake/warehouse
+```
 
 ## License
 
