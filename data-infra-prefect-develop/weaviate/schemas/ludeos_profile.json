@@ -1,0 +1,51 @@
+{
+  "classes": [
+    {
+      "class": "Ludeo",
+      "vectorizer": "text2vec-transformers",
+      "moduleConfig": {
+        "text2vec-transformers": {
+          "vectorizeClassName": false
+        }
+      },
+      "properties": [
+        { "name": "ludeo_id", "dataType": ["text"], "moduleConfig": { "text2vec-transformers": { "vectorizePropertyName": false } } },
+        { "name": "ludeo_name", "dataType": ["text"] },
+        { "name": "created_at", "dataType": ["date"] },
+        { "name": "status", "dataType": ["text"], "moduleConfig": { "text2vec-transformers": { "vectorizePropertyName": false } } },
+        { "name": "ludeo_age", "dataType": ["number"] },
+        { "name": "score_params", "dataType": ["text"] },
+        { "name": "thumbnail_img_analysis", "dataType": ["text"] },
+        { "name": "video_analysis", "dataType": ["text"] },
+        { "name": "tags", "dataType": ["text[]"] },
+        { "name": "objective_score_params_analysis", "dataType": ["text"] },
+        { "name": "environment_analysis", "dataType": ["text[]"] },
+        { "name": "duration_sec", "dataType": ["number"] },
+        { "name": "avg_win_score", "dataType": ["number"] },
+        { "name": "avg_lose_score", "dataType": ["number"] },
+        { "name": "game_id", "dataType": ["text"], "moduleConfig": { "text2vec-transformers": { "vectorizePropertyName": false } } },
+        { "name": "game_name", "dataType": ["text"] },
+        { "name": "creator_username", "dataType": ["text"], "moduleConfig": { "text2vec-transformers": { "vectorizePropertyName": false } } },
+        { "name": "thumb_image", "dataType": ["text"], "moduleConfig": { "text2vec-transformers": { "vectorizePropertyName": false } } },
+        { "name": "video_link", "dataType": ["text"], "moduleConfig": { "text2vec-transformers": { "vectorizePropertyName": false } } },
+        { "name": "total_runs", "dataType": ["number"] },
+        { "name": "total_run_duration_sec", "dataType": ["number"] },
+        { "name": "avg_run_duration_sec", "dataType": ["number"] },
+        { "name": "distinct_players", "dataType": ["number"] },
+        { "name": "total_wins", "dataType": ["number"] },
+        { "name": "win_ratio", "dataType": ["number"] },
+        { "name": "total_restarts", "dataType": ["number"] },
+        {
+          "name": "full_text_enriched",
+          "dataType": ["text"],
+          "description": "Concatenated text fields for unified semantic search",
+          "moduleConfig": {
+            "text2vec-transformers": {
+              "vectorizePropertyName": false
+            }
+          }
+        }
+      ]
+    }
+  ]
+}

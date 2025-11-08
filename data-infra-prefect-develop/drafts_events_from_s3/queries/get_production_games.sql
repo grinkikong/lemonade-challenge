@@ -1,0 +1,1 @@
+SELECT game_id, game_name FROM DATA_WAREHOUSE.SEEDS.GAMES_FOR_REPORTS WHERE is_relevant = TRUE

@@ -1,0 +1,51 @@
+# Prefect deployments configuration for Lemonade Data Ingestion Pipeline
+name: lemonade-data-ingestion
+prefect-version: 2.19.2
+
+# Build section for Docker images (if needed)
+build:
+
+# Push section for remote storage
+push:
+
+# Pull section for cloning project
+pull:
+
+# Deployments section
+deployments:
+  # Hourly Ingestion Pipeline: Combined job with 2 dependent tasks
+  - name: hourly_ingestion_pipeline
+    version: 1
+    tags: ['ingestion', 'spark', 'orchestrator', 'hourly']
+    description: Combined pipeline with Task 1 (move files to processing) and Task 2 (automatically process all folders with Spark jobs)
+    entrypoint: prefect_jobs/hourly_ingestion_pipeline/main.py:hourly_ingestion_pipeline_flow
+    parameters: {}
+    # For local execution - no work pool needed
+    # In production: would use work_pool with Kubernetes/ECS
+    work_pool:
+      name: default-agent-pool
+      work_queue_name: default
+    schedules:
+      - cron: '0 * * * *'  # Every hour at :00
+        timezone: UTC
+        day_or: true
+        active: true
+
+  # Daily Prefect Job: Summary Table Creation
+  - name: daily_summary_aggregation
+    version: 1
+    tags: ['aggregation', 'summary', 'daily', 'iceberg']
+    description: Creates daily summary table in Iceberg format (managed by Glue Catalog) with vehicle_id, day, last_event_time, last_event_type
+    entrypoint: prefect_jobs/daily_summary_aggregation/main.py:daily_summary_aggregation_flow
+    parameters: {}
+    # For local execution - no work pool needed
+    # In production: would use work_pool with Kubernetes/ECS
+    work_pool:
+      name: default-agent-pool
+      work_queue_name: default
+    schedules:
+      - cron: '0 1 * * *'  # Daily at 1 AM UTC
+        timezone: UTC
+        day_or: true
+        active: true
+

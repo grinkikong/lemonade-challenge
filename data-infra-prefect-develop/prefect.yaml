@@ -1,0 +1,257 @@
+# Welcome to your prefect.yaml file! You can use this file for storing and managing
+# configuration for deploying your flows. We recommend committing this file to source
+# control along with your flow code.
+
+# Generic metadata about this project
+name: data-infra-prefect
+prefect-version: 2.19.2
+
+# build section allows you to manage and build docker images
+build:
+
+# push section allows you to manage if and how this project is uploaded to remote locations
+push:
+
+# pull section allows you to provide instructions for cloning this project in remote locations
+pull:
+- prefect.deployments.steps.git_clone:
+    repository: https://github.com/EdgeGamingGG/data-infra-prefect.git
+    branch: "{{ prefect.variables.github_branch }}"
+    access_token: '{{ prefect.blocks.secret.github-token }}'
+
+# the deployments section allows you to provide configuration for deploying flows
+deployments:
+- name: auto_scoring
+  version: 1
+  tags: ['auto_scoring']
+  description:
+  entrypoint: auto_scoring/main.py:auto_scoring_flow
+  parameters: {}
+  work_pool:
+    name: k8-large
+    work_queue_name:
+    job_variables:
+      image: "{{ prefect.variables.aws_account }}.dkr.ecr.us-east-1.amazonaws.com/data/infra-prefect:prefect-jobs-latest"
+      env:
+        ENV: "{{ prefect.variables.env }}"
+  schedules:
+  - cron: '0 */6 * * *'
+    timezone:
+    day_or: true
+    active: true
+
+- name: weaviate_insert_ludeos
+  version: 1
+  tags: ['vector_db', 'analytics', 'backoffice']
+  description: insert ludeos_profile data to weaviate
+  entrypoint: weaviate/jobs/insert_ludeos/main.py:weaviate_insert_ludeos_flow
+  parameters: {}
+  work_pool:
+    name: work-pool-default
+    work_queue_name:
+    job_variables:
+      image: "{{ prefect.variables.aws_account }}.dkr.ecr.us-east-1.amazonaws.com/data/infra-prefect:prefect-jobs-latest"
+      env:
+        ENV: "{{ prefect.variables.env }}"
+  schedules:
+  - cron: '0 2 * * *'
+    timezone:
+    day_or: true
+    active: true
+
+- name: cost_and_usage
+  version: 1
+  tags: ['cost_and_usage', 'analytics']
+  description: get aws costs and usage to snowflake
+  entrypoint: cost_and_usage/main.py:cost_and_usage_flow
+  parameters: {}
+  work_pool:
+    name: work-pool-default
+    work_queue_name:
+    job_variables:
+      image: "{{ prefect.variables.aws_account }}.dkr.ecr.us-east-1.amazonaws.com/data/infra-prefect:prefect-jobs-latest"
+      env:
+        ENV: "{{ prefect.variables.env }}"
+  schedules:
+  - cron: '0 3 * * *'
+    timezone:
+    day_or: true
+    active: true
+        
+- name: recommendations_snowflake_to_dynamo
+  version: 1
+  tags: ['recommendations', 'critical']
+  description: run recommendations DBT models, get latest results and insert to dynamo
+  entrypoint: recommendations/jobs/snowflake_to_dynamo/main.py:recommendations_snowflake_to_dynamo_flow
+  parameters: {}
+  work_pool:
+    name: work-pool-default
+    work_queue_name:
+    job_variables:
+      image: "{{ prefect.variables.aws_account }}.dkr.ecr.us-east-1.amazonaws.com/data/infra-prefect:prefect-jobs-latest"
+      env:
+        ENV: "{{ prefect.variables.env }}"
+  schedules:
+  - cron: '10 * * * *'
+    timezone:
+    day_or: true
+    active: true
+
+- name: health_checker
+  version: 1
+  tags: ['system_health', 'monitoring']
+  description: Run health checks to make sure data infra is working properly. see README for more info
+  entrypoint: health_checker/main.py:health_checker_flow
+  parameters: {}
+  work_pool:
+    name: work-pool-default
+    work_queue_name:
+    job_variables:
+      image: "{{ prefect.variables.aws_account }}.dkr.ecr.us-east-1.amazonaws.com/data/infra-prefect:prefect-jobs-latest"
+      env:
+        ENV: "{{ prefect.variables.env }}"
+  schedules:
+  - cron: '*/10 * * * *'
+    timezone:
+    day_or: true
+    active: true
+
+- name: respark_emr_jobs
+  version: 1
+  tags: ['datalake', 'spark', 'monitoring']
+  description: Runs periodic jobs checks on the Amazon EMR cluster to make sure data infra is working properly and jobs are running as expected
+  entrypoint: respark_emr_jobs/main.py:respark_emr_jobs_flow
+  parameters: {}
+  work_pool:
+    name: work-pool-default
+    work_queue_name:
+    job_variables:
+      image: "{{ prefect.variables.aws_account }}.dkr.ecr.us-east-1.amazonaws.com/data/infra-prefect:prefect-jobs-latest"
+      env:
+        ENV: "{{ prefect.variables.env }}"
+  schedules:
+  - cron: '*/10 * * * *'
+    timezone:
+    day_or: true
+    active: true
+
+- name: tableau_reports_sender
+  version: 1
+  tags: ['tableau','ai', 'analytics']
+  description: The flow runs the tableau report analyzer to get insights on the tableau reports
+  entrypoint: tableau_reports_sender/main.py:tableau_reports_sender_flow
+  parameters: {}
+  work_pool:
+    name: work-pool-default
+    work_queue_name:
+    job_variables:
+      image: "{{ prefect.variables.aws_account }}.dkr.ecr.us-east-1.amazonaws.com/data/infra-prefect:prefect-jobs-latest"
+      env:
+        ENV: "{{ prefect.variables.env }}"
+  schedules:
+  - cron: '30 3 * * *'
+    timezone:
+    day_or: true
+    active: true
+
+- name: sql_reports
+  version: 1
+  tags: ['monitoring', 'analytics']
+  description: runs scheduled SQL queries and sends the results to the respective channels if any results back
+  entrypoint: sql_reports/main.py:sql_reports_flow
+  parameters: {}
+  work_pool:
+    name: work-pool-default
+    work_queue_name:
+    job_variables:
+      image: "{{ prefect.variables.aws_account }}.dkr.ecr.us-east-1.amazonaws.com/data/infra-prefect:prefect-jobs-latest"
+      env:
+        ENV: "{{ prefect.variables.env }}"
+  schedules:
+  - cron: '10 * * * *'
+    timezone:
+    day_or: true
+    active: true
+
+- name: events_reloader
+  version: 1
+  tags: ['eventflow', 'reloader', 'monitoring']
+  entrypoint: events_reloader/main.py:events_reloader_flow
+  parameters:
+    hours_back: 1
+  work_pool:
+    name: work-pool-default
+    work_queue_name:
+    job_variables:
+      image: "{{ prefect.variables.aws_account }}.dkr.ecr.us-east-1.amazonaws.com/data/infra-prefect:prefect-jobs-latest"
+      env:
+        ENV: "{{ prefect.variables.env }}"
+  schedule:
+    cron: "10 * * * *"
+
+- name: drafts_events_from_s3_to_snowflake
+  version: 1
+  tags: ['etl', 'game_events']
+  description: Extract drafts data from S3 buckets and load into Snowflake.
+  entrypoint: drafts_events_from_s3/main.py:drafts_events_from_s3_to_snowflake_flow
+  work_pool:
+    name: work-pool-default
+    work_queue_name:
+    job_variables:
+      image: "{{ prefect.variables.aws_account }}.dkr.ecr.us-east-1.amazonaws.com/data/infra-prefect:prefect-jobs-latest"
+      env:
+        ENV: "{{ prefect.variables.env }}"
+  schedules:
+    - cron: '0 5 * * *'
+      day_or: true
+      active: true
+
+- name: ludeos_metadata_analyzer
+  version: 1
+  tags: ['ai', 'analytics', 'llm']
+  description: Extract ludeo metadata and video and analyze with LLM
+  entrypoint: ludeos_metadata_analyzer/main.py:ludeos_metadata_analyzer_flow
+  work_pool:
+    name: work-pool-default
+    work_queue_name:
+    job_variables:
+      image: "{{ prefect.variables.aws_account }}.dkr.ecr.us-east-1.amazonaws.com/data/infra-prefect:prefect-jobs-latest"
+      env:
+        ENV: "{{ prefect.variables.env }}"
+  schedules:
+    - cron: '0 5 * * *'
+      day_or: true
+      active: true
+
+- name: update_postgres_events_metadata
+  version: 1
+  tags: ['metadata', 'events', 'monitoring']
+  description: Update postgres events metadata table with missing backend and client events
+  entrypoint: update_postgres_events_metadata/main.py:update_postgres_events_metadata_flow
+  work_pool:
+    name: work-pool-default
+    work_queue_name:
+    job_variables:
+      image: "{{ prefect.variables.aws_account }}.dkr.ecr.us-east-1.amazonaws.com/data/infra-prefect:prefect-jobs-latest"
+      env:
+        ENV: "{{ prefect.variables.env }}"
+  schedules:
+    - cron: '0 */4 * * *'
+      day_or: true
+      active: true
+
+- name: events_schema_validator
+  version: 1
+  tags: ['eventflow', 'datalake', 'monitoring']
+  entrypoint: events_schema_validator/main.py:events_schema_validator_flow
+  parameters:
+    hours_back: 1
+  work_pool:
+    name: work-pool-default
+    work_queue_name:
+    job_variables:
+      image: "{{ prefect.variables.aws_account }}.dkr.ecr.us-east-1.amazonaws.com/data/infra-prefect:prefect-jobs-latest"
+      env:
+        ENV: "{{ prefect.variables.env }}"
+  schedule:
+    cron: '15 * * * *'

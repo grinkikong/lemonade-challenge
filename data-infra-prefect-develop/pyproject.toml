@@ -1,0 +1,37 @@
+[tool.poetry]
+name = "data-infra-prefect"
+version = "0.1.0"
+description = ""
+authors = ["stas <stas.grinberg@ludeo.com>"]
+readme = "README.md"
+
+
+[tool.poetry.dependencies]
+python = "^3.11"
+prefect = "^2.19.2"
+prefect-aws = "^0.4.17"
+python-dotenv = "^1.0.1"
+prefect-docker = "^0.5.2"
+prefect-github = "^0.2.5"
+bs4 = "^0.0.2"
+fastavro = "^1.9.4"
+data-utils = {version = "^0.2.4", extras = [
+    "datadog_utils", "snowflake_utils", "slack_utils", "redis_utils", "aws_secrets_manager_utils",
+    "dbt_cloud_utils", "weaviate_utils", "emr_utils", "chatgpt_utils", "tableau_utils", "kafka_utils", "sqlalchemy_utils",
+    "claude_utils"
+]}
+h11 = "^0.14.0"
+psycopg2-binary = "^2.9.9"
+
+[[tool.poetry.source]]
+name = "artifact"
+url = "https://utilities-160482222172.d.codeartifact.eu-central-1.amazonaws.com/pypi/data-utils/simple"
+priority = "primary"
+
+[[tool.poetry.source]]
+name = "PyPI"
+priority = "supplemental"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"

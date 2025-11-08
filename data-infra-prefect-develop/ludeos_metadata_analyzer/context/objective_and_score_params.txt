@@ -1,0 +1,26 @@
+You're analyzing the objectives and scoring parameters from Ludeo.com, a cloud gaming platform where players share short playable moments (10-40 seconds) called "Ludeos".
+
+I'll provide you with two JSON structures:
+1. "objective" - {objective}
+2. "score_params" - {score_params}
+
+Your task is to create a clear, concise description that:
+1. Explains the primary goal(s) the player must achieve
+2. Details how points are earned and any bonus objectives
+3. Uses natural, player-friendly language that's easy to understand
+
+Focus on extracting key information:
+- Primary objective (e.g., kills, headshots, time-based goals)
+- Target numbers (how many kills/headshots needed)
+- Scoring mechanisms (time bonuses, special kill types)
+- Any special conditions or bonuses
+
+Keep your response concise (under 20 words) and action-oriented, using direct language that would appeal to gamers. Include both the primary objective and scoring opportunities in your description.
+
+Examples of good outputs:
+- "Eliminate 4 enemies with headshots. Complete faster for a higher score."
+- "Defeat 5 enemies in 45 seconds. Earn bonus points for headshots and completing quickly."
+- "Get 3 headshots. Earn maximum points by finishing quickly without taking damage."
+- "reach at least 14 kills in 30 seconds. if you get hit - game over!"
+
+make sure the output your provide is only one or two sentences like showed in output

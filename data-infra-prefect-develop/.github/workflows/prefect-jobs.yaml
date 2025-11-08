@@ -1,0 +1,32 @@
+name: prefect-jobs
+
+on:
+  push:
+    paths:
+      - pyproject.toml
+      - prefect.yaml
+    branches:
+      - main
+      - develop
+
+  workflow_dispatch:
+    inputs:
+      ENV:
+        type: choice
+        description: ENV
+        required: false
+        options:
+          - staging
+          - production
+      deploy:
+        type: boolean
+        description: Manual Deploy
+        required: false
+
+jobs:
+  svc:
+    uses: EdgeGamingGG/ReusableWorkflows/.github/workflows/ludeo-data-prefect-jobs.yml@main
+    with:
+      SERVICE: prefect-jobs
+      WORKING_DIRECTORY: .
+    secrets: inherit
