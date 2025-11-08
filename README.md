@@ -318,23 +318,25 @@ The system supports **dynamic file types** managed through the `table_metadata` 
 **Schedule**: Daily at 1:00 AM UTC (runs after 00:00 UTC to process the day that just ended)
 
 **Overview**: 
-The daily summary job processes events with a **2-day lookback window** and **event-time filtering** to handle late-arriving data. It reads from the last 2 days of partitions but filters events by their actual `event_time` field (not partition date), ensuring late data is captured correctly.
+The daily summary job processes events with a **2-day lookback window** and **event-time filtering** to handle late-arriving data. When processing a `target_date`, it processes events from **yesterday** (target_date - 1 day) based on their `event_time` field, while reading from multiple partitions to catch late-arriving data.
 
 **How it works**:
-1. **Reads 2 days back**: Reads partitions for `date={day_before_yesterday}` and `date={yesterday}`
-2. **Event-time filtering**: Filters events where `event_time` is between 2 days ago 00:00 UTC and yesterday 23:59:59 UTC
-3. **Partition by event date**: Summary table is partitioned by `day` (derived from `event_time`), not processing date
-4. **Merge/upsert logic**: If late data arrives, existing summaries for previous days are updated (not overwritten)
+1. **Reads 2 days back partitions**: Reads partitions for `date={day_before_yesterday}` and `date={yesterday}` to efficiently catch late-arriving data
+2. **Event-time filtering**: Filters events where `event_time` is on **yesterday** (target_date - 1 day), not the target_date itself
+3. **48-hour window**: Also filters to only include events from the last 48 hours, excluding very old late events that might be in those partitions
+4. **Partition by event date**: Summary table is partitioned by `day` (derived from `event_time`), not processing date
+5. **Merge/upsert logic**: If late data arrives, existing summaries for previous days are updated (not overwritten)
 
 **Tasks**:
 1. **Create Daily Summary** (`create_daily_summary`): 
-   - Reads from last 2 days of partitions
-   - Filters by `event_time` field
+   - Reads from partitions `date={day_before_yesterday}` and `date={yesterday}` (to catch late arrivals)
+   - Filters events where `event_time` is on **yesterday** (target_date - 1 day)
+   - Applies 48-hour window filter to exclude very old late events
    - Aggregates to get last event per vehicle per day
    - Creates/updates summaries partitioned by event date
    - Summary columns:
      - `vehicle_id`
-     - `day` (from `event_time`, not partition date)
+     - `day` (from `event_time`, not partition date or processing date)
      - `last_event_time`
      - `last_event_type`
 
@@ -344,11 +346,13 @@ The daily summary job processes events with a **2-day lookback window** and **ev
 3. **Historical backfill**: Historical data outside the 2-day window requires a separate backfill process (see Backfill section below)
 
 **Example Scenario**:
-- Event from 2025-11-08 23:30 arrives at 2025-11-09 02:00 (in partition `date=2025-11-09`)
-- Job runs at 2025-11-09 01:00 UTC
-- Reads partitions: `date=2025-11-07` and `date=2025-11-08`
-- Filters: `event_time` between 2025-11-07 00:00 and 2025-11-08 23:59:59
-- **Result**: Event is included in summary for `day=2025-11-08` (based on `event_time`)
+- Job runs at 2025-11-09 01:00 UTC with `target_date = 2025-11-09`
+- Reads partitions: `date=2025-11-08` and `date=2025-11-09` (to catch late arrivals)
+- Filters: `event_time` is on **2025-11-08** (yesterday) AND within last 48 hours
+- **Result**: 
+  - Events with `event_time` on 2025-11-08 are included in summary for `day=2025-11-08`
+  - Events with `event_time` on 2025-11-07 (too old, >48 hours) are excluded
+  - Late-arriving events from 2025-11-08 that landed in partition `date=2025-11-09` are also included
 
 **Entry Point**: `prefect_jobs/daily_summary/main.py:daily_summary_aggregation_flow`
 
