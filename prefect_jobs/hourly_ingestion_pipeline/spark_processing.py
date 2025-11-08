@@ -1,15 +1,21 @@
-"""Spark processing: reads files from processing folders, writes to Iceberg datalake."""
+"""Spark processing: reads files from processing folders, writes to datalake.
+
+TODO v2: Add metadata table support:
+- Retrieve schemas from database
+- Support dynamic file types
+- Full schema validation from metadata
+"""
 
 import traceback
 from pathlib import Path
 from prefect import task, get_run_logger
 from data_utils.aws.s3_driver import s3_driver
-from data_utils.database.drivers import db_driver
-from data_utils.database.models import TableMetadata
 from prefect_jobs.hourly_ingestion_pipeline.config import (
     PROCESSING_FOLDER,
     FAILED_FOLDER,
-    DATALAKE_BASE
+    DATALAKE_BASE,
+    FILE_TYPE_CONFIG,
+    SUPPORTED_FILE_TYPES,
 )
 from prefect_jobs.hourly_ingestion_pipeline.utils import (
     process_files_with_pyspark,
@@ -26,70 +32,42 @@ def discover_processing_folders() -> list:
     logger.info(f"Discovering processing folders in {PROCESSING_FOLDER}")
     processing_folders = []
 
-    # Get all active registered file types from database
-    with db_driver.session() as session:
-        active_metadata = (
-            session.query(TableMetadata)
-            .filter(TableMetadata.status == "active")
-            .all()
-        )
-        for metadata in active_metadata:
-            # Use processing_folder_path from metadata, or default to file_type
-            processing_folder_path = metadata.processing_folder_path or metadata.file_type
-            folder_path = PROCESSING_FOLDER / processing_folder_path
-            folder_str = str(folder_path)
-            
-            # Check if folder has files
-            files = s3_driver.list_files(folder_str)
-            if files:
-                processing_folders.append(folder_str)
-                logger.info(f"Found {len(files)} files in {folder_str}")
+    # Check each supported file type for files in processing folder
+    for file_type in SUPPORTED_FILE_TYPES:
+        folder_path = PROCESSING_FOLDER / file_type
+        folder_str = str(folder_path)
+        
+        # Check if folder has files
+        files = s3_driver.list_files(folder_str)
+        if files:
+            processing_folders.append(folder_str)
+            logger.info(f"Found {len(files)} files in {folder_str}")
 
     logger.info(f"Found {len(processing_folders)} processing folders with files")
     return processing_folders
 
 
-def get_metadata_for_folder(processing_folder: str) -> tuple:
-    """Get table metadata for processing folder and extract values while in session."""
+def get_file_type_config(processing_folder: str) -> tuple:
+    """Get file type configuration for processing folder.
+    
+    Returns:
+        Tuple of (config_dict, file_type) or (None, folder_name) if not supported
+    """
     folder_path = Path(processing_folder)
-    processing_folder_name = folder_path.name
+    folder_name = folder_path.name
     
-    with db_driver.session() as session:
-        metadata_by_folder = (
-            session.query(TableMetadata)
-            .filter(TableMetadata.processing_folder_path == processing_folder_name)
-            .filter(TableMetadata.status == "active")
-            .first()
-        )
-        if metadata_by_folder:
-            # Extract values while in session
-            metadata_dict = {
-                "file_type": metadata_by_folder.file_type,
-                "partition_column": metadata_by_folder.partition_column,
-                "processing_folder_path": metadata_by_folder.processing_folder_path,
-                "schema_definition": metadata_by_folder.schema_definition,
-                "processing_config": metadata_by_folder.processing_config,
-            }
-            return metadata_dict, metadata_by_folder.file_type
-        
-        metadata_by_type = (
-            session.query(TableMetadata)
-            .filter(TableMetadata.file_type == processing_folder_name)
-            .filter(TableMetadata.status == "active")
-            .first()
-        )
-        if metadata_by_type:
-            # Extract values while in session
-            metadata_dict = {
-                "file_type": metadata_by_type.file_type,
-                "partition_column": metadata_by_type.partition_column,
-                "processing_folder_path": metadata_by_type.processing_folder_path,
-                "schema_definition": metadata_by_type.schema_definition,
-                "processing_config": metadata_by_type.processing_config,
-            }
-            return metadata_dict, metadata_by_type.file_type
+    # Check if folder name matches a supported file type
+    if folder_name in FILE_TYPE_CONFIG:
+        config = FILE_TYPE_CONFIG[folder_name]
+        metadata_dict = {
+            "file_type": folder_name,
+            "partition_column": config["partition_column"],
+            "required_columns": config["required_columns"],
+            "root_keys": config["root_keys"],
+        }
+        return metadata_dict, folder_name
     
-    return None, processing_folder_name
+    return None, folder_name
 
 
 def process_files_batch_with_spark(
@@ -136,10 +114,10 @@ def process_folder_with_spark(processing_folder: str) -> dict:
     if not files:
         return {"processed": 0, "failed": 0, "folder": processing_folder}
 
-    metadata_dict, file_type = get_metadata_for_folder(processing_folder)
+    config_dict, file_type = get_file_type_config(processing_folder)
     
-    if not metadata_dict:
-        logger.error(f"No metadata for {file_type} in {processing_folder}")
+    if not config_dict:
+        logger.error(f"Unsupported file type in folder: {processing_folder}")
         for file_path in files:
             file_name = Path(file_path).name
             dest_path = FAILED_FOLDER / file_type / file_name
@@ -147,13 +125,13 @@ def process_folder_with_spark(processing_folder: str) -> dict:
                 s3_driver.move_file(file_path, str(dest_path))
             except Exception as move_error:
                 logger.error(f"Failed to move {file_name} to failed: {move_error}")
-        raise Exception(f"No active metadata for {file_type}. Files moved to failed.")
+        raise Exception(f"Unsupported file type: {file_type}. Files moved to failed.")
     
     output_table = DATALAKE_BASE / "raw_data" / file_type
 
     # Process all files and write to Parquet datalake
     result = process_files_batch_with_spark(
-        files, file_type, output_table, metadata_dict
+        files, file_type, output_table, config_dict
     )
     
     # Task 2 only processes and writes to Parquet - cleanup is done in Task 3

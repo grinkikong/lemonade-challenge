@@ -161,7 +161,12 @@ def cleanup_all_data(clean_datalake=False):
 
 
 def setup_metadata():
-    """Create metadata entries in database for happy flow."""
+    """Create metadata entries in database for happy flow.
+    
+    Note: Metadata setup is optional for v1 (simplified approach).
+    The pipeline now uses hardcoded file type definitions.
+    Metadata will be used in v2 for dynamic file type support.
+    """
     print("Setting up metadata in database...")
     
     # Ensure database tables exist
@@ -229,7 +234,8 @@ def main():
     )
     parser.add_argument("--continuous", action="store_true", help="Generate continuously")
     parser.add_argument("--retroactive", action="store_true", help="Generate retroactive files")
-    parser.add_argument("--skip-metadata", action="store_true", help="Skip metadata setup")
+    parser.add_argument("--skip-metadata", action="store_true", 
+                        help="Skip metadata setup (v1: metadata is optional, pipeline uses hardcoded config)")
     parser.add_argument("--cleanup", action="store_true", help="Clean source data folders before generating (default: no cleanup)")
     parser.add_argument("--clean-datalake", action="store_true", help="Also clean datalake when using --cleanup (default: datalake is preserved)")
     parser.add_argument("--num-files", type=int, default=5, help="Number of files to generate for each type (default: 5)")
@@ -249,9 +255,12 @@ def main():
         print("ℹ️  No cleanup requested - existing data will be preserved")
         print("   Use --cleanup to clean source data folders, --clean-datalake to also clean datalake\n")
 
-    # Setup metadata for happy flow
+    # Setup metadata (optional for v1 - pipeline uses hardcoded config)
+    # Metadata will be required in v2 for dynamic file type support
     if not args.skip_metadata:
         setup_metadata()
+    else:
+        print("ℹ️  Skipping metadata setup (v1 uses hardcoded file type config)\n")
 
     # Use absolute path from project root
     project_root = Path(__file__).parent.parent

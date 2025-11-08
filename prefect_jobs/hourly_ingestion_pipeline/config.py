@@ -3,6 +3,31 @@
 import os
 from pathlib import Path
 
+# TODO v2: Add metadata table with full schema validation:
+# - Store schemas in database (PostgreSQL in production)
+# - Support dynamic file types without code changes
+# - Full schema validation (data types, value ranges, required fields)
+# - Status management (active/inactive) for file types
+# - Processing config per file type
+
+# Hardcoded file type definitions (v1 - simplified)
+# Supported file types: vehicle_events and vehicle_status
+FILE_TYPE_CONFIG = {
+    "vehicle_events": {
+        "required_columns": ["vehicle_id", "event_time", "event_source", "event_type"],
+        "root_keys": ["vehicles_events", "vehicle_events"],  # Support both plural and singular
+        "partition_column": "date",
+    },
+    "vehicle_status": {
+        "required_columns": ["vehicle_id", "report_time", "status_source", "status"],
+        "root_keys": ["vehicles_status", "vehicle_status"],  # Support both plural and singular
+        "partition_column": "date",
+    },
+}
+
+# List of supported file types
+SUPPORTED_FILE_TYPES = list(FILE_TYPE_CONFIG.keys())
+
 ENV = os.environ.get("ENV", "local")
 
 # Default database path (outside project)

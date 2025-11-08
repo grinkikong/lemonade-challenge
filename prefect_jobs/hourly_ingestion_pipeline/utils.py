@@ -220,12 +220,8 @@ def process_files_with_pyspark(
             .getOrCreate()
 
         partition_col = metadata_dict.get("partition_column", "date") if metadata_dict else "date"
-        schema_def = metadata_dict.get("schema_definition") if metadata_dict else None
-        
-        # Convert JSON schema to Spark schema if available (for validation after extraction)
-        spark_schema = None
-        if schema_def:
-            spark_schema = convert_json_schema_to_spark_schema(schema_def)
+        required_columns = metadata_dict.get("required_columns", []) if metadata_dict else []
+        root_keys = metadata_dict.get("root_keys", []) if metadata_dict else []
         
         # Read JSON files WITHOUT schema first (because JSON has nested structure)
         # We'll extract the nested data first, then validate
@@ -241,24 +237,33 @@ def process_files_with_pyspark(
             }
         
         # Extract records from nested structure (e.g., {"vehicles_events": [...]})
-        # Flatten if needed - handle both singular and plural forms
+        # Flatten if needed - handle both plural and singular forms
         columns = df.columns
         
-        # Try to find the array column (could be file_type or plural version)
+        # Try to find the array column using root_keys from config
         array_column = None
-        if file_type in columns:
-            array_column = file_type
-        elif f"{file_type}s" in columns:  # e.g., vehicle_events -> vehicles_events
-            array_column = f"{file_type}s"
-        elif len(columns) == 1 and columns[0] != "_corrupt_record":
-            # Only one column - use it (but not _corrupt_record)
-            array_column = columns[0]
+        if root_keys:
+            # Check each possible root key
+            for root_key in root_keys:
+                if root_key in columns:
+                    array_column = root_key
+                    break
+        
+        # Fallback: try file_type or common patterns
+        if not array_column:
+            if file_type in columns:
+                array_column = file_type
+            elif f"{file_type}s" in columns:  # e.g., vehicle_events -> vehicles_events
+                array_column = f"{file_type}s"
+            elif len(columns) == 1 and columns[0] != "_corrupt_record":
+                # Only one column - use it (but not _corrupt_record)
+                array_column = columns[0]
         
         if not array_column:
             spark.stop()
             return {
                 "status": "schema_validation_failed",
-                "error": f"Could not find array column for file_type '{file_type}' in columns: {columns}",
+                "error": f"Could not find array column for file_type '{file_type}' in columns: {columns}. Expected one of: {root_keys}",
                 "records_count": 0,
             }
         
@@ -266,17 +271,15 @@ def process_files_with_pyspark(
         df = df.select(explode(col(array_column)).alias("data"))
         df = df.select("data.*")
         
-        # Now validate against schema if provided (after extraction)
-        if spark_schema:
-            # Check if extracted columns match expected schema
-            expected_cols = set([field.name for field in spark_schema.fields])
+        # Validate required columns exist (after extraction)
+        if required_columns:
             actual_cols = set(df.columns)
-            missing_cols = expected_cols - actual_cols
+            missing_cols = set(required_columns) - actual_cols
             if missing_cols:
                 spark.stop()
                 return {
                     "status": "schema_validation_failed",
-                    "error": f"Missing columns after extraction: {missing_cols}",
+                    "error": f"Missing required columns after extraction: {missing_cols}. Found columns: {actual_cols}",
                     "records_count": 0,
                 }
         
