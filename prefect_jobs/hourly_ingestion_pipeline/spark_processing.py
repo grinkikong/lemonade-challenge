@@ -8,10 +8,8 @@ from data_utils.database.drivers import db_driver
 from data_utils.database.models import TableMetadata
 from prefect_jobs.hourly_ingestion_pipeline.config import (
     PROCESSING_FOLDER,
-    PROCESSED_FOLDER,
     FAILED_FOLDER,
-    DATALAKE_BASE,
-    ENV,
+    DATALAKE_BASE
 )
 from prefect_jobs.hourly_ingestion_pipeline.utils import (
     process_files_with_pyspark,
